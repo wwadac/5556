@@ -31,9 +31,9 @@ with open('config.json', 'r') as config_file:
     config = json.load(config_file)
 
 # Извлечение данных из загруженной конфигурации
-api_id = config["api_id"]
-api_hash = config["api_hash"]
-bot_token = config["bot_token"]
+api_id = config["29385016"]
+api_hash = config["3c57df8805ab5de5a23a032ed39b9af9"]
+bot_token = config["8324933170:AAFatQ1T42ZJ70oeWS2UJkcXFeiwUFCIXAk"]
 my_id = config["my_id"]
 technical_channel_id = config["technical_channel_id"]
 new_link = config["new_link"]
