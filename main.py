@@ -3,6 +3,8 @@ import random
 import pandas as pd
 import json
 import sqlite3
+import os
+import io
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -12,8 +14,7 @@ from telegram.ext import (
 import logging
 
 # Настройки
-BOT_TOKEN = "8324933170:AAFatQ1T42ZJ70oeWS2UJkcXFeiwUFCIXAk"
-EXCEL_FILE = "development(500).xlsx"
+BOT_TOKEN = os.getenv('BOT_TOKEN', '8324933170:AAFatQ1T42ZJ70oeWS2UJkcXFeiwUFCIXAk')
 
 # Настройка логирования
 logging.basicConfig(
@@ -24,70 +25,124 @@ logger = logging.getLogger(__name__)
 
 class AdminUserBot:
     def __init__(self):
-        self.users_data = self.load_users_data()
-        self.settings = self.load_settings()
         self.setup_database()
+        self.users_data = []
+        self.settings = self.load_settings()
         
     def setup_database(self):
         """Настраивает базу данных для хранения настроек"""
-        conn = sqlite3.connect('bot_settings.db')
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        ''')
-        conn.commit()
-        conn.close()
+        try:
+            conn = sqlite3.connect('bot_settings.db')
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            ''')
+            
+            cursor.execute('SELECT COUNT(*) FROM settings')
+            if cursor.fetchone()[0] == 0:
+                default_settings = [
+                    ('channel', ''),
+                    ('interval', '3600'),
+                    ('is_active', 'False'),
+                    ('admin_ids', '[]'),
+                    ('last_sent_index', '0')
+                ]
+                cursor.executemany(
+                    'INSERT INTO settings (key, value) VALUES (?, ?)',
+                    default_settings
+                )
+            
+            conn.commit()
+            conn.close()
+            logger.info("База данных инициализирована")
+        except Exception as e:
+            logger.error(f"Ошибка инициализации базы данных: {e}")
         
     def save_setting(self, key, value):
         """Сохраняет настройку в базу данных"""
-        conn = sqlite3.connect('bot_settings.db')
-        cursor = conn.cursor()
-        cursor.execute(
-            'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
-            (key, value)
-        )
-        conn.commit()
-        conn.close()
+        try:
+            conn = sqlite3.connect('bot_settings.db')
+            cursor = conn.cursor()
+            cursor.execute(
+                'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+                (key, value)
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Ошибка сохранения настройки {key}: {e}")
         
     def load_setting(self, key, default=None):
         """Загружает настройку из базы данных"""
-        conn = sqlite3.connect('bot_settings.db')
-        cursor = conn.cursor()
-        cursor.execute('SELECT value FROM settings WHERE key = ?', (key,))
-        result = cursor.fetchone()
-        conn.close()
-        return result[0] if result else default
-        
-    def load_users_data(self):
-        """Загружает данные пользователей из Excel файла"""
         try:
-            df = pd.read_excel(EXCEL_FILE)
-            logger.info(f"Загружено {len(df)} пользователей из Excel")
-            return df.to_dict('records')
+            conn = sqlite3.connect('bot_settings.db')
+            cursor = conn.cursor()
+            cursor.execute('SELECT value FROM settings WHERE key = ?', (key,))
+            result = cursor.fetchone()
+            conn.close()
+            return result[0] if result else default
+        except Exception as e:
+            logger.error(f"Ошибка загрузки настройки {key}: {e}")
+            return default
+        
+    def load_excel_from_file(self, file_content):
+        """Загружает данные из Excel файла"""
+        try:
+            # Читаем Excel файл из bytes
+            df = pd.read_excel(io.BytesIO(file_content))
+            users_data = df.to_dict('records')
+            logger.info(f"Загружено {len(users_data)} пользователей из Excel")
+            return users_data
         except Exception as e:
             logger.error(f"Ошибка загрузки Excel: {e}")
-            return []
+            raise e
+    
+    def create_demo_data(self):
+        """Создает демо-данные"""
+        demo_data = []
+        for i in range(10):
+            demo_data.append({
+                'A': f'https://t.me/user{i}',
+                'B': f'Demo User {i}',
+                'C': f'Demo description for user {i}',
+                'E': 'MALE' if i % 2 == 0 else 'FEMALE'
+            })
+        logger.info(f"Создано {len(demo_data)} демо-пользователей")
+        return demo_data
     
     def load_settings(self):
         """Загружает настройки"""
-        return {
-            'channel': self.load_setting('channel', ''),
-            'interval': int(self.load_setting('interval', '3600')),
-            'is_active': self.load_setting('is_active', 'False') == 'True',
-            'admin_ids': json.loads(self.load_setting('admin_ids', '[]')),
-            'last_sent_index': int(self.load_setting('last_sent_index', '0'))
-        }
+        try:
+            return {
+                'channel': self.load_setting('channel', ''),
+                'interval': int(self.load_setting('interval', '3600')),
+                'is_active': self.load_setting('is_active', 'False') == 'True',
+                'admin_ids': json.loads(self.load_setting('admin_ids', '[]')),
+                'last_sent_index': int(self.load_setting('last_sent_index', '0'))
+            }
+        except Exception as e:
+            logger.error(f"Ошибка загрузки настроек: {e}")
+            return {
+                'channel': '',
+                'interval': 3600,
+                'is_active': False,
+                'admin_ids': [],
+                'last_sent_index': 0
+            }
     
     def save_settings(self):
         """Сохраняет все настройки"""
-        for key, value in self.settings.items():
-            if key == 'admin_ids':
-                self.save_setting(key, json.dumps(value))
-            else:
-                self.save_setting(key, str(value))
+        try:
+            for key, value in self.settings.items():
+                if key == 'admin_ids':
+                    self.save_setting(key, json.dumps(value))
+                else:
+                    self.save_setting(key, str(value))
+        except Exception as e:
+            logger.error(f"Ошибка сохранения настроек: {e}")
     
     def is_admin(self, user_id):
         """Проверяет, является ли пользователь администратором"""
@@ -108,17 +163,20 @@ class AdminUserBot:
     def get_random_user(self):
         """Возвращает случайного пользователя из данных"""
         if not self.users_data:
-            return None
+            return self.create_demo_data()[0] if self.create_demo_data() else None
         return random.choice(self.users_data)
     
     def get_next_user(self):
         """Возвращает следующего пользователя по порядку"""
         if not self.users_data:
-            return None
-        
-        user = self.users_data[self.settings['last_sent_index']]
-        self.settings['last_sent_index'] = (self.settings['last_sent_index'] + 1) % len(self.users_data)
-        self.save_settings()
+            demo_data = self.create_demo_data()
+            if not demo_data:
+                return None
+            user = demo_data[0]
+        else:
+            user = self.users_data[self.settings['last_sent_index']]
+            self.settings['last_sent_index'] = (self.settings['last_sent_index'] + 1) % len(self.users_data)
+            self.save_settings()
         return user
     
     def format_user_message(self, user_data):
@@ -139,12 +197,18 @@ class AdminUserBot:
         return message
 
 # Создаем экземпляр бота
-bot = AdminUserBot()
+try:
+    bot = AdminUserBot()
+    logger.info("Бот успешно инициализирован")
+except Exception as e:
+    logger.error(f"Критическая ошибка инициализации бота: {e}")
+    bot = None
 
 # ===== КЛАВИАТУРЫ =====
-def get_admin_keyboard():
-    """Клавиатура админ-панели"""
+def get_main_keyboard():
+    """Основная клавиатура"""
     keyboard = [
+        [InlineKeyboardButton("📤 Загрузить Excel файл", callback_data="upload_excel")],
         [InlineKeyboardButton("⚙️ Настройки канала", callback_data="channel_settings")],
         [InlineKeyboardButton("⏰ Настройки времени", callback_data="time_settings")],
         [InlineKeyboardButton("🔧 Управление рассылкой", callback_data="mailing_control")],
@@ -156,6 +220,9 @@ def get_admin_keyboard():
 
 def get_settings_keyboard():
     """Клавиатура настроек"""
+    if not bot:
+        return InlineKeyboardMarkup([])
+        
     status = "✅ ВКЛ" if bot.settings['is_active'] else "❌ ВЫКЛ"
     keyboard = [
         [InlineKeyboardButton(f"🔄 Авто-отправка: {status}", callback_data="toggle_auto")],
@@ -197,13 +264,21 @@ def get_admin_management_keyboard():
 # ===== ОБРАБОТЧИКИ КОМАНД =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
+    if not bot:
+        await update.message.reply_text("❌ Бот временно недоступен. Попробуйте позже.")
+        return
+        
     user_id = update.effective_user.id
     
     if bot.is_admin(user_id):
         await update.message.reply_text(
             "🛠 **Админ-панель управления ботом**\n\n"
+            "📁 **Для начала работы:**\n"
+            "1. Загрузите Excel файл с пользователями\n"
+            "2. Настройте канал для отправки\n"
+            "3. Запустите автоматическую рассылку\n\n"
             "Выберите действие:",
-            reply_markup=get_admin_keyboard()
+            reply_markup=get_main_keyboard()
         )
     else:
         await update.message.reply_text(
@@ -213,13 +288,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда для открытия админ-панели"""
+    if not bot:
+        await update.message.reply_text("❌ Бот временно недоступен. Попробуйте позже.")
+        return
+        
     user_id = update.effective_user.id
     
     if bot.is_admin(user_id):
         await update.message.reply_text(
-            "🛠 **Админ-панель управления ботом**\n\n"
-            "Выберите действие:",
-            reply_markup=get_admin_keyboard()
+            "🛠 **Админ-панель управления ботом**\n\nВыберите действие:",
+            reply_markup=get_main_keyboard()
         )
     else:
         await update.message.reply_text("❌ У вас нет доступа к админ-панели.")
@@ -227,6 +305,10 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===== ОБРАБОТЧИКИ CALLBACK =====
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик нажатий на кнопки"""
+    if not bot:
+        await update.callback_query.answer("❌ Бот временно недоступен", show_alert=True)
+        return
+        
     query = update.callback_query
     await query.answer()
     
@@ -237,7 +319,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     data = query.data
     
-    if data == "channel_settings":
+    if data == "upload_excel":
+        await query.edit_message_text(
+            "📤 **Загрузка Excel файла**\n\n"
+            "Отправьте мне Excel файл (.xlsx) с данными пользователей.\n\n"
+            "**Формат файла:**\n"
+            "- Столбец A: Ссылка на Telegram\n"
+            "- Столбец B: Имя пользователя\n"
+            "- Столбец C: Описание\n"
+            "- Столбец E: Пол\n\n"
+            "Просто перетащите файл в этот чат или используйте скрепку 📎"
+        )
+        context.user_data['waiting_for_excel'] = True
+        
+    elif data == "channel_settings":
         await show_channel_settings(query)
     elif data == "time_settings":
         await show_time_settings(query)
@@ -252,7 +347,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "back_to_main":
         await query.edit_message_text(
             "🛠 **Админ-панель управления ботом**\n\nВыберите действие:",
-            reply_markup=get_admin_keyboard()
+            reply_markup=get_main_keyboard()
         )
     elif data == "back_to_settings":
         await show_channel_settings(query)
@@ -283,11 +378,65 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "list_admins":
         await show_admin_list(query)
 
+# ===== ОБРАБОТЧИКИ ФАЙЛОВ =====
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик загрузки файлов"""
+    if not bot:
+        await update.message.reply_text("❌ Бот временно недоступен.")
+        return
+        
+    user_id = update.effective_user.id
+    if not bot.is_admin(user_id):
+        await update.message.reply_text("❌ У вас нет доступа.")
+        return
+    
+    # Проверяем, ждем ли мы Excel файл
+    if not context.user_data.get('waiting_for_excel'):
+        return
+    
+    document = update.message.document
+    
+    # Проверяем расширение файла
+    if not document.file_name.lower().endswith(('.xlsx', '.xls')):
+        await update.message.reply_text(
+            "❌ Пожалуйста, отправьте файл в формате Excel (.xlsx или .xls)"
+        )
+        return
+    
+    try:
+        # Скачиваем файл
+        file = await context.bot.get_file(document.file_id)
+        file_content = await file.download_as_bytearray()
+        
+        # Загружаем данные из Excel
+        bot.users_data = bot.load_excel_from_file(file_content)
+        
+        # Сбрасываем счетчик отправленных пользователей
+        bot.settings['last_sent_index'] = 0
+        bot.save_settings()
+        
+        await update.message.reply_text(
+            f"✅ Файл успешно загружен!\n"
+            f"📊 Загружено пользователей: {len(bot.users_data)}\n\n"
+            f"Теперь настройте канал и запустите рассылку.",
+            reply_markup=get_main_keyboard()
+        )
+        
+        context.user_data['waiting_for_excel'] = False
+        
+    except Exception as e:
+        logger.error(f"Ошибка обработки файла: {e}")
+        await update.message.reply_text(
+            f"❌ Ошибка загрузки файла: {str(e)}\n"
+            f"Проверьте формат файла и попробуйте снова."
+        )
+
 async def show_channel_settings(query):
     """Показывает настройки канала"""
     channel = bot.settings['channel'] or "Не установлен"
     interval = bot.settings['interval']
     status = "✅ Активна" if bot.settings['is_active'] else "❌ Остановлена"
+    users_count = len(bot.users_data) if bot.users_data else 0
     
     # Конвертируем интервал в читаемый формат
     if interval < 60:
@@ -299,6 +448,7 @@ async def show_channel_settings(query):
     
     message = (
         "⚙️ **Настройки рассылки**\n\n"
+        f"📊 **Пользователей загружено:** {users_count}\n"
         f"📢 **Канал:** {channel}\n"
         f"⏰ **Интервал:** {interval_text}\n"
         f"🔄 **Статус:** {status}\n\n"
@@ -306,14 +456,6 @@ async def show_channel_settings(query):
     )
     
     await query.edit_message_text(message, reply_markup=get_settings_keyboard())
-
-async def show_time_settings(query):
-    """Показывает настройки времени"""
-    await query.edit_message_text(
-        "⏰ **Настройки интервала отправки**\n\n"
-        "Выберите интервал:",
-        reply_markup=get_time_keyboard()
-    )
 
 async def show_mailing_control(query):
     """Показывает управление рассылкой"""
@@ -324,32 +466,29 @@ async def show_mailing_control(query):
         [InlineKeyboardButton("◀️ Назад", callback_data="back_to_main")]
     ]
     
+    users_count = len(bot.users_data) if bot.users_data else 0
+    
     await query.edit_message_text(
-        "🔧 **Управление рассылкой**\n\n"
+        f"🔧 **Управление рассылкой**\n\n"
+        f"📊 Пользователей загружено: {users_count}\n\n"
         "Запустите или остановите автоматическую отправку:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-async def show_admin_management(query):
-    """Показывает управление админами"""
-    await query.edit_message_text(
-        "👥 **Управление администраторами**\n\n"
-        "Выберите действие:",
-        reply_markup=get_admin_management_keyboard()
-    )
-
 async def show_statistics(query):
     """Показывает статистику"""
-    total_users = len(bot.users_data)
+    total_users = len(bot.users_data) if bot.users_data else 0
     sent_users = bot.settings['last_sent_index']
-    remaining = total_users - sent_users
+    remaining = total_users - sent_users if total_users > 0 else 0
+    
+    progress = (sent_users/total_users*100) if total_users > 0 else 0
     
     message = (
         "📊 **Статистика бота**\n\n"
         f"👥 Всего пользователей: {total_users}\n"
         f"📤 Отправлено: {sent_users}\n"
         f"📋 Осталось: {remaining}\n"
-        f"🔄 Прогресс: {sent_users/total_users*100:.1f}%\n\n"
+        f"🔄 Прогресс: {progress:.1f}%\n\n"
         f"📢 Канал: {bot.settings['channel'] or 'Не установлен'}\n"
         f"⏰ Интервал: {bot.settings['interval']} сек\n"
         f"🔄 Авто-отправка: {'✅ ВКЛ' if bot.settings['is_active'] else '❌ ВЫКЛ'}"
@@ -365,11 +504,18 @@ async def send_test_user(query):
         message = bot.format_user_message(user_data)
         try:
             await query.message.reply_text(message, parse_mode='Markdown')
-            await query.edit_message_text("✅ Тестовый пользователь отправлен!")
+            await query.edit_message_text(
+                "✅ Тестовый пользователь отправлен в этот чат!\n"
+                "Проверьте формат сообщения перед настройкой канала.",
+                reply_markup=get_main_keyboard()
+            )
         except Exception as e:
             await query.edit_message_text(f"❌ Ошибка отправки: {e}")
     else:
-        await query.edit_message_text("❌ Нет данных пользователей")
+        await query.edit_message_text(
+            "❌ Нет данных пользователей. Сначала загрузите Excel файл.",
+            reply_markup=get_main_keyboard()
+        )
 
 async def set_interval(query, data):
     """Устанавливает интервал отправки"""
@@ -377,8 +523,16 @@ async def set_interval(query, data):
     bot.settings['interval'] = seconds
     bot.save_settings()
     
+    # Конвертируем в читаемый формат
+    if seconds < 60:
+        interval_text = f"{seconds} сек"
+    elif seconds < 3600:
+        interval_text = f"{seconds // 60} мин"
+    else:
+        interval_text = f"{seconds // 3600} час"
+    
     await query.edit_message_text(
-        f"✅ Интервал установлен: {seconds} секунд",
+        f"✅ Интервал установлен: {interval_text}",
         reply_markup=get_settings_keyboard()
     )
 
@@ -407,6 +561,9 @@ async def show_admin_list(query):
 # ===== ОБРАБОТЧИКИ СООБЩЕНИЙ =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик текстовых сообщений"""
+    if not bot:
+        return
+        
     user_id = update.effective_user.id
     text = update.message.text
     
@@ -418,7 +575,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text.startswith('@'):
             bot.settings['channel'] = text
             bot.save_settings()
-            await update.message.reply_text(f"✅ Канал установлен: {text}")
+            await update.message.reply_text(
+                f"✅ Канал установлен: {text}\n\n"
+                f"Теперь можно запускать рассылку.",
+                reply_markup=get_main_keyboard()
+            )
             context.user_data['waiting_for_channel'] = False
         else:
             await update.message.reply_text("❌ Username канала должен начинаться с @")
@@ -428,7 +589,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             new_admin_id = int(text)
             bot.add_admin(new_admin_id)
-            await update.message.reply_text(f"✅ Админ добавлен: {new_admin_id}")
+            await update.message.reply_text(
+                f"✅ Админ добавлен: {new_admin_id}",
+                reply_markup=get_main_keyboard()
+            )
             context.user_data['waiting_for_admin_add'] = False
         except ValueError:
             await update.message.reply_text("❌ ID должен быть числом")
@@ -438,7 +602,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             admin_id = int(text)
             bot.remove_admin(admin_id)
-            await update.message.reply_text(f"✅ Админ удален: {admin_id}")
+            await update.message.reply_text(
+                f"✅ Админ удален: {admin_id}",
+                reply_markup=get_main_keyboard()
+            )
             context.user_data['waiting_for_admin_remove'] = False
         except ValueError:
             await update.message.reply_text("❌ ID должен быть числом")
@@ -446,7 +613,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===== АВТОМАТИЧЕСКАЯ ОТПРАВКА =====
 async def auto_send_users(context: ContextTypes.DEFAULT_TYPE):
     """Автоматическая отправка пользователей в канал"""
-    if not bot.settings['is_active'] or not bot.settings['channel']:
+    if not bot or not bot.settings['is_active'] or not bot.settings['channel']:
         return
     
     try:
@@ -473,6 +640,7 @@ def main():
     application.add_handler(CommandHandler("admin", admin_panel))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
     # Настраиваем job queue для авто-отправки
     job_queue = application.job_queue
@@ -483,10 +651,14 @@ def main():
     )
     
     # Добавляем первого админа (замените на ваш ID)
-    bot.add_admin(6893832048)  # Ваш Telegram ID
+    # Чтобы узнать свой ID, напишите /start боту @userinfobot
+    YOUR_USER_ID = 8000395560  # ЗАМЕНИТЕ НА ВАШ REAL USER ID
+    if bot:
+        bot.add_admin(YOUR_USER_ID)
     
     # Запускаем бота
     print("🤖 Бот запущен!")
+    print("📁 Теперь вы можете загружать Excel файлы через Telegram!")
     application.run_polling()
 
 if __name__ == "__main__":
