@@ -1,166 +1,385 @@
-import asyncio
-import logging
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.types import Message, File
-import pandas as pd
-import io
+# main.py
 import os
+import asyncio
+from datetime import datetime
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+import json
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Токен бота (замени на свой)
-API_TOKEN = '8324933170:AAFatQ1T42ZJ70oeWS2UJkcXFeiwUFCIXAk'
-
-# Инициализация бота и диспетчера
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
-
-# Хранилище для данных (в памяти)
-user_data = {}
-
-@dp.message(Command("start"))
-async def cmd_start(message: Message):
-    await message.answer(
-        "📊 Бот для работы с Excel базой пользователей\n\n"
-        "Отправь мне Excel файл (.xlsx) со столбцом 'username' или 'user_id'\n"
-        "Затем используй команду /mention_all для упоминания всех пользователей\n"
-        "Команда /clear - очистить базу"
-    )
-
-@dp.message(Command("clear"))
-async def cmd_clear(message: Message):
-    user_data[message.chat.id] = []
-    await message.answer("✅ База данных очищена")
-
-@dp.message(Command("mention_all"))
-async def cmd_mention_all(message: Message):
-    chat_id = message.chat.id
+class TelegramParserBot:
+    def __init__(self):
+        # Конфигурация
+        self.config_file = 'bot_config.json'
+        self.parser_sessions = {}  # {user_id: session_data}
+        
+        # Загрузка конфигурации
+        self.config = self.load_config()
+        
+        # Инициализация бота
+        self.bot = Client(
+            "parser_bot",
+            api_id=self.config.get('api_id', 29385016),
+            api_hash=self.config.get('api_hash', '3c57df8805ab5de5a23a032ed39b9af9'),
+            bot_token=self.config.get('bot_token', '8231456588:AAGNtU0IvMnpFBSGFOTzhIWUiUeplaSNhCU')  # Получите у @BotFather
+        )
     
-    if chat_id not in user_data or not user_data[chat_id]:
-        await message.answer("❌ База данных пуста. Сначала отправь Excel файл")
-        return
+    def load_config(self):
+        """Загрузка конфигурации"""
+        if os.path.exists(self.config_file):
+            with open(self.config_file, 'r') as f:
+                return json.load(f)
+        return {}
     
-    users = user_data[chat_id]
-    mentions = []
+    def save_config(self):
+        """Сохранение конфигурации"""
+        with open(self.config_file, 'w') as f:
+            json.dump(self.config, f, indent=4)
     
-    for user in users:
-        if 'username' in user and user['username']:
-            # Если есть username, создаем ссылку
-            username = user['username'].lstrip('@')
-            mentions.append(f"@{username}")
-        elif 'user_id' in user and user['user_id']:
-            # Если есть user_id, упоминаем по ID
-            mentions.append(f"<a href='tg://user?id={user['user_id']}'>👤</a>")
-        elif 'name' in user and user['name']:
-            # Если есть только имя
-            mentions.append(f"👤 {user['name']}")
-    
-    if mentions:
-        text = "📢 Упоминания из базы данных:\n\n" + "\n".join(mentions)
-        await message.answer(text, parse_mode='HTML')
-    else:
-        await message.answer("❌ Не найдено данных для упоминания")
+    async def start_bot(self):
+        """Запуск бота"""
+        print("🤖 Запуск Telegram бота...")
+        
+        # Регистрация обработчиков
+        @self.bot.on_message(filters.command("start"))
+        async def start_command(client: Client, message: Message):
+            await message.reply_text(
+                "👋 **Привет! Я бот для парсинга Telegram чатов**\n\n"
+                "📋 **Доступные команды:**\n"
+                "/auth - 🔐 Авторизовать аккаунт для парсинга\n"
+                "/proxy - 🔧 Настроить прокси\n"
+                "/parse - 🔍 Начать парсинг чата\n"
+                "/sessions - 📊 Мои сессии\n"
+                "/help - ❓ Помощь\n\n"
+                "⚡ **Быстрый старт:**\n"
+                "1. Используйте /auth для добавления аккаунта\n"
+                "2. Используйте /parse для парсинга",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔐 Авторизация", callback_data="auth"),
+                     InlineKeyboardButton("🔍 Парсинг", callback_data="parse")]
+                ])
+            )
+        
+        @self.bot.on_message(filters.command("auth"))
+        async def auth_command(client: Client, message: Message):
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📱 По номеру телефона", callback_data="auth_phone")],
+                [InlineKeyboardButton("🔑 По сессии", callback_data="auth_session")]
+            ])
+            await message.reply_text(
+                "🔐 **Выберите способ авторизации:**",
+                reply_markup=keyboard
+            )
+        
+        @self.bot.on_message(filters.command("parse"))
+        async def parse_command(client: Client, message: Message):
+            user_id = message.from_user.id
+            
+            if str(user_id) not in self.parser_sessions:
+                await message.reply_text(
+                    "❌ **У вас нет активных сессий!**\n"
+                    "Сначала используйте /auth для авторизации аккаунта."
+                )
+                return
+            
+            await message.reply_text(
+                "🔍 **Введите ссылку на чат для парсинга:**\n\n"
+                "Примеры:\n"
+                "• @username\n"
+                "• https://t.me/username\n"
+                "• https://t.me/c/123456789\n\n"
+                "💡 _Просто отправьте ссылку в ответ на это сообщение_"
+            )
+        
+        @self.bot.on_message(filters.command("proxy"))
+        async def proxy_command(client: Client, message: Message):
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ Добавить прокси", callback_data="add_proxy")],
+                [InlineKeyboardButton("📋 Мои прокси", callback_data="list_proxy")],
+                [InlineKeyboardButton("🗑️ Удалить прокси", callback_data="remove_proxy")]
+            ])
+            
+            await message.reply_text(
+                "🔧 **Управление прокси:**",
+                reply_markup=keyboard
+            )
+        
+        @self.bot.on_message(filters.command("sessions"))
+        async def sessions_command(client: Client, message: Message):
+            user_id = str(message.from_user.id)
+            
+            if user_id not in self.parser_sessions:
+                await message.reply_text("❌ **У вас нет активных сессий**")
+                return
+            
+            sessions = self.parser_sessions[user_id]
+            text = "📊 **Ваши активные сессии:**\n\n"
+            
+            for idx, session in enumerate(sessions, 1):
+                text += f"**{idx}.** Аккаунт ID: `{session.get('user_id', 'Неизвестно')}`\n"
+                if session.get('username'):
+                    text += f"   👤 @{session['username']}\n"
+                text += f"   📅 Добавлен: {session.get('added_date', 'Неизвестно')}\n\n"
+            
+            await message.reply_text(text)
+        
+        @self.bot.on_message(filters.command("help"))
+        async def help_command(client: Client, message: Message):
+            help_text = """
+            🤖 **Telegram Parser Bot - Помощь**
 
-@dp.message(F.document)
-async def handle_excel_file(message: Message):
-    # Проверяем, что файл Excel
-    if not (message.document.file_name.endswith('.xlsx') or 
-            message.document.file_name.endswith('.xls')):
-        await message.answer("❌ Пожалуйста, отправьте файл в формате Excel (.xlsx или .xls)")
-        return
+            🔐 **Авторизация:**
+            • Используйте /auth для добавления аккаунта
+            • Можно добавить несколько аккаунтов
+            
+            🔧 **Прокси:**
+            • /proxy - настройка прокси (SOCKS5/HTTP)
+            • Поддерживается ротация прокси
+            
+            🔍 **Парсинг:**
+            • /parse - начать парсинг чата
+            • Бот автоматически отправит файл с юзернеймами
+            
+            ⚙️ **Настройки:**
+            • Можно указать период парсинга (дни)
+            • Настройка лимита сообщений
+            
+            ⚠️ **Важно:**
+            • Используйте отдельные прокси для каждого аккаунта
+            • Не парсите слишком быстро (риск бана)
+            • Сохраняйте сессии
+            
+            📞 **Поддержка:**
+            По вопросам: @ваш_ник
+            """
+            await message.reply_text(help_text)
+        
+        # Обработка ссылок на чаты
+        @self.bot.on_message(filters.text & filters.private)
+        async def handle_chat_link(client: Client, message: Message):
+            user_id = str(message.from_user.id)
+            
+            # Проверяем, это ссылка на чат?
+            text = message.text.strip()
+            if any(trigger in text for trigger in ['@', 't.me/', 'telegram.me/']):
+                # Это похоже на ссылку на чат
+                if user_id in self.parser_sessions:
+                    await self.start_parsing(message, text)
+        
+        # Обработка inline кнопок
+        @self.bot.on_callback_query()
+        async def handle_callback(client: Client, callback_query):
+            data = callback_query.data
+            user_id = str(callback_query.from_user.id)
+            
+            if data == "auth":
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📱 По номеру телефона", callback_data="auth_phone")],
+                    [InlineKeyboardButton("🔑 По сессии", callback_data="auth_session")]
+                ])
+                await callback_query.message.edit_text(
+                    "🔐 **Выберите способ авторизации:**",
+                    reply_markup=keyboard
+                )
+            
+            elif data == "auth_phone":
+                await callback_query.message.edit_text(
+                    "📱 **Введите номер телефона:**\n\n"
+                    "Формат: +79123456789\n\n"
+                    "💡 _Отправьте номер в ответ на это сообщение_"
+                )
+                # Здесь нужно сохранить состояние для ожидания номера
+            
+            elif data == "parse":
+                if user_id not in self.parser_sessions:
+                    await callback_query.answer("❌ Сначала авторизуйтесь!", show_alert=True)
+                    return
+                
+                await callback_query.message.edit_text(
+                    "🔍 **Введите ссылку на чат для парсинга:**\n\n"
+                    "Примеры:\n"
+                    "• @username\n"
+                    "• https://t.me/username\n"
+                    "• https://t.me/c/123456789"
+                )
+            
+            elif data == "add_proxy":
+                await callback_query.message.edit_text(
+                    "🔧 **Добавление прокси:**\n\n"
+                    "Отправьте прокси в формате:\n"
+                    "`тип:адрес:порт:логин:пароль`\n\n"
+                    "Примеры:\n"
+                    "`socks5:1.1.1.1:1080:user:pass`\n"
+                    "`http:2.2.2.2:8080::`\n"
+                    "`socks5:3.3.3.3:9050::`\n\n"
+                    "💡 _Отправьте в ответ на это сообщение_"
+                )
+            
+            await callback_query.answer()
+        
+        # Запуск бота
+        print("✅ Бот запущен! Отправьте /start")
+        await self.bot.start()
+        await self.bot.idle()
     
-    try:
-        # Скачиваем файл
-        file = await bot.get_file(message.document.file_id)
-        file_path = file.file_path
+    async def start_parsing(self, message: Message, chat_link: str):
+        """Начало процесса парсинга"""
+        user_id = str(message.from_user.id)
         
-        # Скачиваем содержимое файла
-        file_content = await bot.download_file(file_path)
-        
-        # Читаем Excel файл
-        excel_data = pd.read_excel(file_content)
-        
-        # Преобразуем в список словарей
-        users = excel_data.to_dict('records')
-        
-        # Сохраняем в память
-        user_data[message.chat.id] = users
-        
-        # Формируем отчет
-        total_users = len(users)
-        columns = list(excel_data.columns)
-        
-        response = (
-            f"✅ Файл успешно загружен!\n"
-            f"📊 Загружено записей: {total_users}\n"
-            f"📋 Колонки: {', '.join(columns)}\n\n"
-            f"Теперь используй команду /mention_all для упоминания пользователей"
+        # Отправляем сообщение о начале
+        status_msg = await message.reply_text(
+            "⏳ **Начинаю парсинг...**\n"
+            f"🔗 Чат: {chat_link}\n"
+            "📊 Это может занять некоторое время..."
         )
         
-        await message.answer(response)
+        try:
+            # Получаем сессию пользователя
+            session_data = self.parser_sessions[user_id][0]  # Берём первую сессию
+            
+            # Создаем клиента для парсинга
+            parser_client = await self.create_parser_client(session_data)
+            
+            # Парсим чат
+            usernames, chat_title = await self.parse_telethon_chat(parser_client, chat_link)
+            
+            if usernames:
+                # Сохраняем результаты
+                filename = self.save_results_to_file(usernames, chat_title, user_id)
+                
+                # Отправляем файл
+                await self.send_results_file(message, filename, chat_title, len(usernames))
+                
+                # Обновляем статус
+                await status_msg.edit_text(
+                    f"✅ **Парсинг завершен!**\n\n"
+                    f"💬 Чат: {chat_title}\n"
+                    f"👤 Пользователей: {len(usernames)}\n"
+                    f"📁 Файл отправлен!"
+                )
+            else:
+                await status_msg.edit_text("❌ **Не удалось получить пользователей**")
+            
+            await parser_client.disconnect()
+            
+        except Exception as e:
+            await status_msg.edit_text(f"❌ **Ошибка:** {str(e)}")
+    
+    async def create_parser_client(self, session_data):
+        """Создание клиента Telethon для парсинга"""
+        # Здесь создаем клиент с сессией и прокси
+        # Это упрощенная версия, нужно доработать
         
-    except Exception as e:
-        logger.error(f"Error processing Excel file: {e}")
-        await message.answer("❌ Ошибка при обработке файла. Убедитесь, что это корректный Excel файл")
+        client = TelegramClient(
+            StringSession(session_data['session_string']),
+            api_id=session_data['api_id'],
+            api_hash=session_data['api_hash']
+        )
+        
+        await client.start()
+        return client
+    
+    async def parse_telethon_chat(self, client, chat_link, days=7, limit=2000):
+        """Парсинг чата через Telethon"""
+        try:
+            chat = await client.get_entity(chat_link)
+            chat_title = getattr(chat, 'title', 'Unknown')
+            
+            # Здесь логика парсинга как в предыдущем коде
+            # Упрощенная версия:
+            
+            from datetime import timedelta
+            since_date = datetime.now() - timedelta(days=days)
+            user_ids = set()
+            
+            async for message in client.iter_messages(
+                chat,
+                limit=limit,
+                offset_date=since_date
+            ):
+                if message.sender_id:
+                    user_ids.add(message.sender_id)
+            
+            usernames = []
+            for user_id in user_ids:
+                try:
+                    user = await client.get_entity(user_id)
+                    if user.username:
+                        usernames.append(user.username)
+                    else:
+                        usernames.append(f"id_{user_id}")
+                except:
+                    continue
+            
+            return usernames, chat_title
+            
+        except Exception as e:
+            print(f"Ошибка парсинга: {e}")
+            return [], "Unknown"
+    
+    def save_results_to_file(self, usernames, chat_title, user_id):
+        """Сохранение результатов в файл"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"users_{user_id}_{timestamp}.txt"
+        
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(f"# Парсинг: {chat_title}\n")
+            f.write(f"# Дата: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"# Пользователей: {len(usernames)}\n")
+            f.write("#" * 50 + "\n\n")
+            
+            for username in usernames:
+                f.write(f"{'@' + username if not username.startswith('id_') else username}\n")
+        
+        return filename
+    
+    async def send_results_file(self, message: Message, filename: str, chat_title: str, count: int):
+        """Отправка файла с результатами"""
+        caption = (
+            f"✅ **Парсинг завершен!**\n\n"
+            f"💬 **Чат:** {chat_title}\n"
+            f"👤 **Пользователей:** {count}\n"
+            f"📅 **Дата:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        
+        await message.reply_document(
+            document=filename,
+            caption=caption
+        )
+        
+        # Удаляем временный файл
+        try:
+            os.remove(filename)
+        except:
+            pass
 
-@dp.message(Command("stats"))
-async def cmd_stats(message: Message):
-    chat_id = message.chat.id
-    
-    if chat_id not in user_data or not user_data[chat_id]:
-        await message.answer("📊 База данных пуста")
-        return
-    
-    users = user_data[chat_id]
-    total = len(users)
-    
-    # Статистика по колонкам
-    columns = {}
-    for user in users:
-        for key, value in user.items():
-            if pd.notna(value):  # Проверяем, что значение не NaN
-                if key not in columns:
-                    columns[key] = 0
-                columns[key] += 1
-    
-    stats_text = f"📊 Статистика базы данных:\n\nВсего записей: {total}\n\n"
-    
-    for column, count in columns.items():
-        stats_text += f"{column}: {count} записей\n"
-    
-    await message.answer(stats_text)
-
-@dp.message(Command("help"))
-async def cmd_help(message: Message):
-    help_text = """
-🤖 Помощь по боту:
-
-📥 Загрузка данных:
-- Просто отправь Excel файл (.xlsx) с данными пользователей
-- Обязательная колонка: 'username' или 'user_id'
-- Дополнительно можно добавить: 'name', 'id', etc.
-
-📊 Команды:
-/start - начать работу
-/mention_all - упомянуть всех пользователей из базы
-/stats - статистика базы данных
-/clear - очистить базу
-/help - эта справка
-
-💡 Пример Excel файла:
-username       | name
-@user1        | Иван
-@user2        | Мария
-123456789     | Петр (как user_id)
+# Файл с настройками
+# bot_config.json - создайте его вручную с таким содержимым:
 """
-    await message.answer(help_text)
+{
+    "api_id": 29385016,
+    "api_hash": "3c57df8805ab5de5a23a032ed39b9af9",
+    "bot_token": "ВАШ_ТОКЕН_БОТА_ОТ_BOTFATHER"
+}
+"""
 
 async def main():
-    logger.info("Starting bot...")
-    await dp.start_polling(bot)
+    """Главная функция"""
+    bot = TelegramParserBot()
+    await bot.start_bot()
 
 if __name__ == "__main__":
+    print("""
+╔══════════════════════════════════════╗
+║    🤖 TELEGRAM PARSER BOT           ║
+║                                      ║
+║    🔐 Авторизация аккаунтов         ║
+║    🔧 Поддержка прокси (SOCKS5)     ║
+║    🔍 Парсинг чатов                 ║
+║    📤 Авто-отправка файлов          ║
+╚══════════════════════════════════════╝
+    """)
+    
+    # Запуск бота
     asyncio.run(main())
