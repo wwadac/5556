@@ -1,442 +1,558 @@
-# main.py
-import os
 import asyncio
-from datetime import datetime, timedelta
-from pyrogram import Client, filters, idle
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.enums import ParseMode
-from telethon import TelegramClient
-from telethon.sessions import StringSession
 import json
+import logging
+from datetime import datetime, timedelta
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+import os
 
-class TelegramParserBot:
+# ==================== НАСТРОЙКА ====================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Токен бота (получи у @BotFather)
+BOT_TOKEN = "8556723456:AAFeT0XjYIF9yEYNJnyKH6VWniFLllb6nq4"
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+
+# ==================== ХРАНЕНИЕ ДАННЫХ ====================
+class DataStorage:
     def __init__(self):
-        # Конфигурация
-        self.config_file = 'bot_config.json'
-        self.parser_sessions = {}  # {user_id: session_data}
-        
-        # Загрузка конфигурации
-        self.config = self.load_config()
-        
-        # Инициализация бота
-        self.bot = Client(
-            "parser_bot",
-            api_id=self.config.get('api_id', 29385016),
-            api_hash=self.config.get('api_hash', '3c57df8805ab5de5a23a032ed39b9af9'),
-            bot_token=self.config.get('bot_token', '8231456588:AAGNtU0IvMnpFBSGFOTzhIWUiUeplaSNhCU'),
-            parse_mode=ParseMode.HTML
-        )
-        
-        # Регистрация обработчиков
-        self.setup_handlers()
+        self.data_file = 'bot_data.json'
+        self.load_data()
     
-    def load_config(self):
-        """Загрузка конфигурации"""
-        if os.path.exists(self.config_file):
-            with open(self.config_file, 'r') as f:
-                return json.load(f)
-        return {}
-    
-    def save_config(self):
-        """Сохранение конфигурации"""
-        with open(self.config_file, 'w') as f:
-            json.dump(self.config, f, indent=4)
-    
-    def setup_handlers(self):
-        """Настройка обработчиков"""
-        
-        @self.bot.on_message(filters.command("start"))
-        async def start_command(client: Client, message: Message):
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔐 Авторизация", callback_data="auth_menu"),
-                 InlineKeyboardButton("🔍 Парсинг", callback_data="parse_menu")],
-                [InlineKeyboardButton("⚙️ Настройки", callback_data="settings_menu")]
-            ])
-            
-            await message.reply_text(
-                "👋 <b>Привет! Я бот для парсинга Telegram чатов</b>\n\n"
-                "📋 <b>Доступные команды:</b>\n"
-                "/auth - 🔐 Авторизовать аккаунт для парсинга\n"
-                "/proxy - 🔧 Настроить прокси\n"
-                "/parse - 🔍 Начать парсинг чата\n"
-                "/my - 📊 Мои аккаунты\n"
-                "/help - ❓ Помощь\n\n"
-                "⚡ <b>Быстрый старт:</b>\n"
-                "1. Используйте /auth для добавления аккаунта\n"
-                "2. Используйте /parse для парсинга",
-                reply_markup=keyboard
-            )
-        
-        @self.bot.on_message(filters.command("auth"))
-        async def auth_command(client: Client, message: Message):
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📱 По номеру телефона", callback_data="auth_phone")],
-                [InlineKeyboardButton("🔑 По сессии Telethon", callback_data="auth_session")],
-                [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
-            ])
-            await message.reply_text(
-                "<b>🔐 Выберите способ авторизации:</b>",
-                reply_markup=keyboard
-            )
-        
-        @self.bot.on_message(filters.command("parse"))
-        async def parse_command(client: Client, message: Message):
-            user_id = message.from_user.id
-            
-            if str(user_id) not in self.parser_sessions:
-                await message.reply_text(
-                    "❌ <b>У вас нет активных сессий!</b>\n"
-                    "Сначала используйте /auth для авторизации аккаунта."
-                )
-                return
-            
-            await message.reply_text(
-                "🔍 <b>Введите ссылку на чат для парсинга:</b>\n\n"
-                "<b>Примеры:</b>\n"
-                "• @username\n"
-                "• https://t.me/username\n"
-                "• https://t.me/c/123456789\n\n"
-                "<i>Просто отправьте ссылку в ответ на это сообщение</i>"
-            )
-        
-        @self.bot.on_message(filters.command("proxy"))
-        async def proxy_command(client: Client, message: Message):
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("➕ Добавить прокси", callback_data="add_proxy")],
-                [InlineKeyboardButton("📋 Мои прокси", callback_data="list_proxy")],
-                [InlineKeyboardButton("⚙️ Настроить SOCKS5", callback_data="setup_socks5")]
-            ])
-            
-            await message.reply_text(
-                "<b>🔧 Управление прокси:</b>",
-                reply_markup=keyboard
-            )
-        
-        @self.bot.on_message(filters.command("my"))
-        async def my_command(client: Client, message: Message):
-            user_id = str(message.from_user.id)
-            
-            if user_id not in self.parser_sessions:
-                await message.reply_text("❌ <b>У вас нет активных сессий</b>")
-                return
-            
-            sessions = self.parser_sessions[user_id]
-            text = "<b>📊 Ваши активные сессии:</b>\n\n"
-            
-            for idx, session in enumerate(sessions, 1):
-                text += f"<b>{idx}.</b> Аккаунт ID: <code>{session.get('user_id', 'Неизвестно')}</code>\n"
-                if session.get('username'):
-                    text += f"   👤 @{session['username']}\n"
-                text += f"   📅 Добавлен: {session.get('added_date', 'Неизвестно')}\n\n"
-            
-            await message.reply_text(text)
-        
-        @self.bot.on_message(filters.command("help"))
-        async def help_command(client: Client, message: Message):
-            help_text = """
-🤖 <b>Telegram Parser Bot - Помощь</b>
-
-🔐 <b>Авторизация:</b>
-• Используйте /auth для добавления аккаунта
-• Можно добавить несколько аккаунтов
-
-🔧 <b>Прокси:</b>
-• /proxy - настройка прокси (SOCKS5/HTTP)
-• Поддерживается ротация прокси
-
-🔍 <b>Парсинг:</b>
-• /parse - начать парсинг чата
-• Бот автоматически отправит файл с юзернеймами
-
-⚙️ <b>Настройки:</b>
-• Можно указать период парсинга (дни)
-• Настройка лимита сообщений
-
-⚠️ <b>Важно:</b>
-• Используйте отдельные прокси для каждого аккаунта
-• Не парсите слишком быстро (риск бана)
-• Сохраняйте сессии
-            """
-            await message.reply_text(help_text)
-        
-        @self.bot.on_message(filters.text & filters.private & ~filters.command(["start", "auth", "parse", "proxy", "my", "help"]))
-        async def handle_text(client: Client, message: Message):
-            """Обработка текстовых сообщений"""
-            user_id = str(message.from_user.id)
-            text = message.text.strip()
-            
-            # Если это похоже на ссылку на чат
-            if any(trigger in text for trigger in ['@', 't.me/', 'telegram.me/', 'https://t.me/']):
-                if user_id in self.parser_sessions:
-                    await self.start_parsing(message, text)
-                else:
-                    await message.reply_text("❌ <b>Сначала авторизуйте аккаунт через /auth</b>")
-        
-        # Обработка callback кнопок
-        @self.bot.on_callback_query()
-        async def handle_callback(client: Client, callback_query):
-            data = callback_query.data
-            user_id = str(callback_query.from_user.id)
-            message = callback_query.message
-            
-            if data == "auth_menu":
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📱 По номеру телефона", callback_data="auth_phone")],
-                    [InlineKeyboardButton("🔑 По сессии Telethon", callback_data="auth_session")],
-                    [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
-                ])
-                await message.edit_text(
-                    "<b>🔐 Выберите способ авторизации:</b>",
-                    reply_markup=keyboard
-                )
-            
-            elif data == "auth_phone":
-                await message.edit_text(
-                    "📱 <b>Введите номер телефона:</b>\n\n"
-                    "<b>Формат:</b> +79123456789\n\n"
-                    "<i>Отправьте номер в следующем сообщении</i>"
-                )
-            
-            elif data == "auth_session":
-                await message.edit_text(
-                    "🔑 <b>Введите сессию Telethon:</b>\n\n"
-                    "<i>Отправьте строку сессии в следующем сообщении</i>"
-                )
-            
-            elif data == "parse_menu":
-                if user_id not in self.parser_sessions:
-                    await callback_query.answer("❌ Сначала авторизуйтесь!", show_alert=True)
-                    return
-                
-                await message.edit_text(
-                    "🔍 <b>Введите ссылку на чат для парсинга:</b>\n\n"
-                    "<b>Примеры:</b>\n"
-                    "• @username\n"
-                    "• https://t.me/username\n"
-                    "• https://t.me/c/123456789"
-                )
-            
-            elif data == "setup_socks5":
-                await message.edit_text(
-                    "🔧 <b>Настройка SOCKS5 прокси:</b>\n\n"
-                    "Отправьте прокси в формате:\n"
-                    "<code>ip:port:username:password</code>\n\n"
-                    "<b>Примеры:</b>\n"
-                    "• <code>1.1.1.1:1080:user:pass</code>\n"
-                    "• <code>2.2.2.2:9050::</code>\n"
-                    "• <code>3.3.3.3:4145::</code>\n\n"
-                    "<i>Отправьте в следующем сообщении</i>"
-                )
-            
-            elif data == "cancel":
-                await message.delete()
-            
-            await callback_query.answer()
-    
-    async def start_parsing(self, message: Message, chat_link: str):
-        """Начало процесса парсинга"""
-        user_id = str(message.from_user.id)
-        
-        # Отправляем сообщение о начале
-        status_msg = await message.reply_text(
-            "⏳ <b>Начинаю парсинг...</b>\n"
-            f"🔗 Чат: {chat_link}\n"
-            "📊 Это может занять некоторое время..."
-        )
-        
-        try:
-            # Получаем сессию пользователя
-            if user_id not in self.parser_sessions:
-                await status_msg.edit_text("❌ <b>Нет активных сессий</b>")
-                return
-            
-            session_data = self.parser_sessions[user_id][0]  # Берём первую сессию
-            
-            # Создаем клиента для парсинга
-            parser_client = await self.create_parser_client(session_data)
-            
-            # Парсим чат
-            usernames, chat_title = await self.parse_telethon_chat(parser_client, chat_link)
-            
-            if usernames:
-                # Сохраняем результаты
-                filename = self.save_results_to_file(usernames, chat_title, user_id)
-                
-                # Отправляем файл
-                await self.send_results_file(message, filename, chat_title, len(usernames))
-                
-                # Обновляем статус
-                await status_msg.edit_text(
-                    f"✅ <b>Парсинг завершен!</b>\n\n"
-                    f"💬 Чат: {chat_title}\n"
-                    f"👤 Пользователей: {len(usernames)}\n"
-                    f"📁 Файл отправлен!"
-                )
-            else:
-                await status_msg.edit_text("❌ <b>Не удалось получить пользователей</b>")
-            
-            await parser_client.disconnect()
-            
-        except Exception as e:
-            await status_msg.edit_text(f"❌ <b>Ошибка:</b> {str(e)}")
-    
-    async def create_parser_client(self, session_data):
-        """Создание клиента Telethon для парсинга"""
-        # Используем прокси если есть
-        proxy = None
-        if session_data.get('proxy'):
-            proxy = {
-                'proxy_type': 'socks5',
-                'addr': session_data['proxy']['host'],
-                'port': session_data['proxy']['port'],
-                'username': session_data['proxy'].get('username', ''),
-                'password': session_data['proxy'].get('password', ''),
-                'rdns': True
+    def load_data(self):
+        if os.path.exists(self.data_file):
+            with open(self.data_file, 'r', encoding='utf-8') as f:
+                self.data = json.load(f)
+        else:
+            self.data = {
+                'greetings': {
+                    'привет': {
+                        'text': 'Приветик! 😊',
+                        'sticker_id': None,
+                        'enabled': True
+                    }
+                },
+                'follow_up': {
+                    'text': 'Как твои дела?',
+                    'delay_minutes': 3,
+                    'enabled': True
+                },
+                'auto_reply_enabled': True
             }
-        
-        client = TelegramClient(
-            StringSession(session_data['session_string']),
-            api_id=session_data['api_id'],
-            api_hash=session_data['api_hash'],
-            proxy=proxy
-        )
-        
-        await client.start()
-        return client
+            self.save_data()
     
-    async def parse_telethon_chat(self, client, chat_link, days=7, limit=2000):
-        """Парсинг чата через Telethon"""
-        try:
-            chat = await client.get_entity(chat_link)
-            chat_title = getattr(chat, 'title', 'Unknown')
-            
-            # Собираем сообщения за период
-            since_date = datetime.now() - timedelta(days=days)
-            user_ids = set()
-            
-            print(f"🔍 Парсим чат: {chat_title}")
-            print(f"📅 За последние {days} дней")
-            print(f"📊 Лимит: {limit} сообщений")
-            
-            message_count = 0
-            async for message in client.iter_messages(
-                chat,
-                limit=limit,
-                offset_date=since_date
-            ):
-                message_count += 1
-                if message_count % 100 == 0:
-                    print(f"   Собрано сообщений: {message_count}")
-                
-                if message.sender_id:
-                    user_ids.add(message.sender_id)
-            
-            print(f"📊 Всего сообщений: {message_count}")
-            print(f"👥 Уникальных отправителей: {len(user_ids)}")
-            
-            usernames = []
-            print("👤 Получаю юзернеймы...")
-            
-            for i, user_id in enumerate(user_ids):
-                try:
-                    user = await client.get_entity(user_id)
-                    if user.username:
-                        usernames.append(user.username)
-                    else:
-                        usernames.append(f"id_{user_id}")
-                    
-                    if i % 10 == 0:
-                        await asyncio.sleep(0.1)
-                        
-                except Exception as e:
-                    print(f"   Ошибка при получении пользователя {user_id}: {e}")
-                    continue
-            
-            return usernames, chat_title
-            
-        except Exception as e:
-            print(f"❌ Ошибка парсинга: {e}")
-            return [], "Unknown"
+    def save_data(self):
+        with open(self.data_file, 'w', encoding='utf-8') as f:
+            json.dump(self.data, f, ensure_ascii=False, indent=2)
+
+storage = DataStorage()
+
+# ==================== СОСТОЯНИЯ FSM ====================
+class Form(StatesGroup):
+    waiting_greeting_trigger = State()
+    waiting_greeting_text = State()
+    waiting_greeting_sticker = State()
+    waiting_followup_text = State()
+    waiting_followup_delay = State()
+
+# ==================== ИНЛАЙН-КЛАВИАТУРЫ ====================
+def get_main_menu() -> InlineKeyboardMarkup:
+    """Главное меню с инлайн-кнопками[citation:5]"""
+    builder = InlineKeyboardBuilder()
     
-    def save_results_to_file(self, usernames, chat_title, user_id):
-        """Сохранение результатов в файл"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"users_{user_id}_{timestamp}.txt"
-        
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write(f"# Парсинг: {chat_title}\n")
-            f.write(f"# Дата: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"# Пользователей: {len(usernames)}\n")
-            f.write("#" * 50 + "\n\n")
-            
-            for username in usernames:
-                f.write(f"{'@' + username if not username.startswith('id_') else username}\n")
-        
-        return filename
+    status_icon = "✅" if storage.data['auto_reply_enabled'] else "❌"
     
-    async def send_results_file(self, message: Message, filename: str, chat_title: str, count: int):
-        """Отправка файла с результатами"""
-        caption = (
-            f"✅ <b>Парсинг завершен!</b>\n\n"
-            f"💬 <b>Чат:</b> {chat_title}\n"
-            f"👤 <b>Пользователей:</b> {count}\n"
-            f"📅 <b>Дата:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-        
-        try:
-            await message.reply_document(
-                document=filename,
-                caption=caption,
-                parse_mode=ParseMode.HTML
+    builder.row(
+        InlineKeyboardButton(text=f"Автоответы: {status_icon}", 
+                           callback_data="toggle_auto_reply")
+    )
+    builder.row(
+        InlineKeyboardButton(text="✏️ Триггеры и ответы", callback_data="menu_greetings"),
+        InlineKeyboardButton(text="⏱ Настройка задержки", callback_data="menu_followup")
+    )
+    builder.row(
+        InlineKeyboardButton(text="📊 Статистика", callback_data="stats"),
+        InlineKeyboardButton(text="🆘 Помощь", callback_data="help")
+    )
+    
+    return builder.as_markup()
+
+def get_greetings_menu() -> InlineKeyboardMarkup:
+    """Меню управления триггерами"""
+    builder = InlineKeyboardBuilder()
+    
+    # Показываем существующие триггеры
+    greetings = storage.data['greetings']
+    for trigger, data in greetings.items():
+        status = "✅" if data['enabled'] else "❌"
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{status} '{trigger}' → '{data['text'][:15]}...'",
+                callback_data=f"edit_greeting:{trigger}"
             )
-        finally:
-            # Удаляем временный файл
-            try:
-                os.remove(filename)
-            except:
-                pass
+        )
     
-    async def run(self):
-        """Запуск бота"""
-        print("🤖 Запуск Telegram бота...")
-        await self.bot.start()
-        print("✅ Бот запущен! Отправьте /start")
-        await idle()
-        await self.bot.stop()
-
-
-async def main():
-    """Главная функция"""
-    print("""
-╔══════════════════════════════════════╗
-║    🤖 TELEGRAM PARSER BOT           ║
-║                                      ║
-║    🔐 Авторизация аккаунтов         ║
-║    🔧 Поддержка прокси (SOCKS5)     ║
-║    🔍 Парсинг чатов                 ║
-║    📤 Авто-отправка файлов          ║
-╚══════════════════════════════════════╝
-    """)
+    builder.row(
+        InlineKeyboardButton(text="➕ Добавить триггер", callback_data="add_greeting"),
+        InlineKeyboardButton(text="« Назад", callback_data="main_menu")
+    )
     
-    # Проверяем конфиг
-    if not os.path.exists('bot_config.json'):
-        print("❌ Создайте файл bot_config.json")
-        print("""
-Пример содержимого:
-{
-    "api_id": 29385016,
-    "api_hash": "3c57df8805ab5de5a23a032ed39b9af9",
-    "bot_token": "ВАШ_ТОКЕН_БОТА"
-}
-""")
+    return builder.as_markup()
+
+def get_followup_menu() -> InlineKeyboardMarkup:
+    """Меню настройки follow-up сообщений"""
+    builder = InlineKeyboardBuilder()
+    
+    followup = storage.data['follow_up']
+    status = "✅" if followup['enabled'] else "❌"
+    
+    builder.row(
+        InlineKeyboardButton(
+            text=f"Follow-up: {status}",
+            callback_data="toggle_followup"
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=f"Текст: {followup['text'][:20]}...",
+            callback_data="edit_followup_text"
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=f"Задержка: {followup['delay_minutes']} мин",
+            callback_data="edit_followup_delay"
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(text="« Назад", callback_data="main_menu")
+    )
+    
+    return builder.as_markup()
+
+def get_back_button(menu: str = "main_menu") -> InlineKeyboardMarkup:
+    """Кнопка 'Назад'"""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="« Назад", callback_data=menu))
+    return builder.as_markup()
+
+# ==================== ОБРАБОТЧИКИ КОМАНД ====================
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    """Обработчик команды /start[citation:5]"""
+    await message.answer(
+        "🤖 **Бот-автоответчик активирован!**\n\n"
+        "Я буду автоматически отвечать на сообщения с триггерными словами.\n"
+        "Используйте меню ниже для настройки:",
+        reply_markup=get_main_menu(),
+        parse_mode="Markdown"
+    )
+
+@dp.message(Command("settings"))
+async def cmd_settings(message: Message):
+    """Обработчик команды /settings"""
+    await message.answer(
+        "⚙️ **Панель управления**\nВыберите раздел для настройки:",
+        reply_markup=get_main_menu(),
+        parse_mode="Markdown"
+    )
+
+# ==================== ОБРАБОТЧИКИ CALLBACK-ЗАПРОСОВ ====================
+@dp.callback_query(F.data == "main_menu")
+async def main_menu_handler(callback: CallbackQuery):
+    """Главное меню"""
+    await callback.message.edit_text(
+        "🤖 **Главное меню**\nВыберите раздел:",
+        reply_markup=get_main_menu(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "toggle_auto_reply")
+async def toggle_auto_reply_handler(callback: CallbackQuery):
+    """Включение/выключение автоответов"""
+    storage.data['auto_reply_enabled'] = not storage.data['auto_reply_enabled']
+    storage.save_data()
+    
+    status = "включены" if storage.data['auto_reply_enabled'] else "выключены"
+    await callback.message.edit_text(
+        f"✅ **Автоответы {status}**\n\n"
+        f"Статус изменен. Автоматические ответы теперь {status}.",
+        reply_markup=get_main_menu(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "menu_greetings")
+async def menu_greetings_handler(callback: CallbackQuery):
+    """Меню триггеров"""
+    await callback.message.edit_text(
+        "✏️ **Управление триггерами**\n\n"
+        "Список ваших триггерных слов и ответов:",
+        reply_markup=get_greetings_menu(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "menu_followup")
+async def menu_followup_handler(callback: CallbackQuery):
+    """Меню follow-up сообщений"""
+    followup = storage.data['follow_up']
+    
+    await callback.message.edit_text(
+        "⏱ **Настройка отложенных ответов**\n\n"
+        f"• Статус: {'Включено ✅' if followup['enabled'] else 'Выключено ❌'}\n"
+        f"• Текст: {followup['text']}\n"
+        f"• Задержка: {followup['delay_minutes']} минут\n\n"
+        "Выберите параметр для изменения:",
+        reply_markup=get_followup_menu(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("edit_greeting:"))
+async def edit_greeting_handler(callback: CallbackQuery, state: FSMContext):
+    """Редактирование конкретного триггера"""
+    trigger = callback.data.split(":")[1]
+    greeting_data = storage.data['greetings'].get(trigger)
+    
+    if not greeting_data:
+        await callback.answer("Триггер не найден!")
         return
     
-    bot = TelegramParserBot()
-    await bot.run()
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="📝 Изменить текст", 
+                           callback_data=f"change_text:{trigger}"),
+        InlineKeyboardButton(text="🖼 Изменить стикер", 
+                           callback_data=f"change_sticker:{trigger}")
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=f"{'❌ Выключить' if greeting_data['enabled'] else '✅ Включить'}",
+            callback_data=f"toggle_greeting:{trigger}"
+        ),
+        InlineKeyboardButton(text="🗑 Удалить", 
+                           callback_data=f"delete_greeting:{trigger}")
+    )
+    builder.row(
+        InlineKeyboardButton(text="« Назад", callback_data="menu_greetings")
+    )
+    
+    sticker_info = f"\nСтикер: {'есть' if greeting_data['sticker_id'] else 'нет'}" 
+    
+    await callback.message.edit_text(
+        f"✏️ **Редактирование триггера**\n\n"
+        f"• Триггер: `{trigger}`\n"
+        f"• Ответ: {greeting_data['text']}\n"
+        f"• Статус: {'Включен ✅' if greeting_data['enabled'] else 'Выключен ❌'}"
+        f"{sticker_info}\n\n"
+        f"Выберите действие:",
+        reply_markup=builder.as_markup(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
 
+@dp.callback_query(F.data == "add_greeting")
+async def add_greeting_handler(callback: CallbackQuery, state: FSMContext):
+    """Добавление нового триггера"""
+    await callback.message.edit_text(
+        "📝 **Добавление нового триггера**\n\n"
+        "Отправьте мне слово-триггер (например, 'привет'):",
+        reply_markup=get_back_button("menu_greetings"),
+        parse_mode="Markdown"
+    )
+    await state.set_state(Form.waiting_greeting_trigger)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("change_text:"))
+async def change_text_handler(callback: CallbackQuery, state: FSMContext):
+    """Изменение текста ответа"""
+    trigger = callback.data.split(":")[1]
+    await state.update_data(editing_trigger=trigger)
+    
+    await callback.message.edit_text(
+        f"📝 **Изменение текста ответа**\n\n"
+        f"Текущий текст: `{storage.data['greetings'][trigger]['text']}`\n\n"
+        f"Отправьте новый текст ответа для триггера '{trigger}':",
+        reply_markup=get_back_button(f"edit_greeting:{trigger}"),
+        parse_mode="Markdown"
+    )
+    await state.set_state(Form.waiting_greeting_text)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("change_sticker:"))
+async def change_sticker_handler(callback: CallbackQuery, state: FSMContext):
+    """Изменение стикера"""
+    trigger = callback.data.split(":")[1]
+    await state.update_data(editing_trigger=trigger)
+    
+    await callback.message.edit_text(
+        "🖼 **Добавление стикера**\n\n"
+        "Отправьте мне стикер, который будет отправляться вместе с текстом "
+        "(или отправьте 'удалить', чтобы убрать стикер):",
+        reply_markup=get_back_button(f"edit_greeting:{trigger}"),
+        parse_mode="Markdown"
+    )
+    await state.set_state(Form.waiting_greeting_sticker)
+    await callback.answer()
+
+@dp.callback_query(F.data == "edit_followup_text")
+async def edit_followup_text_handler(callback: CallbackQuery, state: FSMContext):
+    """Изменение текста follow-up сообщения"""
+    await callback.message.edit_text(
+        "📝 **Изменение текста follow-up**\n\n"
+        f"Текущий текст: `{storage.data['follow_up']['text']}`\n\n"
+        "Отправьте новый текст для отложенного ответа:",
+        reply_markup=get_back_button("menu_followup"),
+        parse_mode="Markdown"
+    )
+    await state.set_state(Form.waiting_followup_text)
+    await callback.answer()
+
+@dp.callback_query(F.data == "edit_followup_delay")
+async def edit_followup_delay_handler(callback: CallbackQuery, state: FSMContext):
+    """Изменение задержки follow-up"""
+    await callback.message.edit_text(
+        "⏱ **Изменение задержки**\n\n"
+        f"Текущая задержка: {storage.data['follow_up']['delay_minutes']} минут\n\n"
+        "Отправьте новую задержку в минутах (от 1 до 60):",
+        reply_markup=get_back_button("menu_followup"),
+        parse_mode="Markdown"
+    )
+    await state.set_state(Form.waiting_followup_delay)
+    await callback.answer()
+
+@dp.callback_query(F.data == "stats")
+async def stats_handler(callback: CallbackQuery):
+    """Статистика бота"""
+    greetings = storage.data['greetings']
+    followup = storage.data['follow_up']
+    
+    stats_text = (
+        "📊 **Статистика бота**\n\n"
+        f"• Автоответы: {'✅ Включены' if storage.data['auto_reply_enabled'] else '❌ Выключены'}\n"
+        f"• Количество триггеров: {len(greetings)}\n"
+        f"• Follow-up: {'✅ Включен' if followup['enabled'] else '❌ Выключен'}\n"
+        f"• Задержка follow-up: {followup['delay_minutes']} мин\n\n"
+        "**Активные триггеры:**\n"
+    )
+    
+    for trigger, data in greetings.items():
+        if data['enabled']:
+            stats_text += f"• `{trigger}` → {data['text'][:20]}...\n"
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="« Назад", callback_data="main_menu"))
+    
+    await callback.message.edit_text(
+        stats_text,
+        reply_markup=builder.as_markup(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "help")
+async def help_handler(callback: CallbackQuery):
+    """Помощь"""
+    help_text = (
+        "🆘 **Помощь по боту**\n\n"
+        "🤖 **Основные функции:**\n"
+        "1. Автоматические ответы на триггерные слова\n"
+        "2. Отложенные ответы (follow-up)\n"
+        "3. Настройка стикеров\n\n"
+        "⚙️ **Как настроить:**\n"
+        "1. Добавьте триггеры в разделе 'Триггеры и ответы'\n"
+        "2. Настройте текст и стикеры для каждого триггера\n"
+        "3. Включите автоответы в главном меню\n\n"
+        "⏱ **Follow-up сообщения:**\n"
+        "После ответа собеседника бот отправит отложенное сообщение через указанное время\n\n"
+        "💡 **Примечание:** Бот работает в личных чатах и группах (если добавлен в группу)"
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="« Назад", callback_data="main_menu"))
+    
+    await callback.message.edit_text(
+        help_text,
+        reply_markup=builder.as_markup(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+# ==================== ОБРАБОТЧИКИ СОСТОЯНИЙ FSM ====================
+@dp.message(Form.waiting_greeting_trigger)
+async def process_greeting_trigger(message: Message, state: FSMContext):
+    """Обработка нового триггера"""
+    trigger = message.text.strip().lower()
+    
+    if trigger in storage.data['greetings']:
+        await message.answer(
+            f"⚠️ Триггер '{trigger}' уже существует!",
+            reply_markup=get_back_button("menu_greetings")
+        )
+        return
+    
+    # Создаем новый триггер
+    storage.data['greetings'][trigger] = {
+        'text': f"Ответ на '{trigger}'",
+        'sticker_id': None,
+        'enabled': True
+    }
+    storage.save_data()
+    
+    await state.clear()
+    await message.answer(
+        f"✅ Триггер '{trigger}' добавлен!\n"
+        f"Теперь настройте текст ответа для него.",
+        reply_markup=get_greetings_menu()
+    )
+
+@dp.message(Form.waiting_greeting_text)
+async def process_greeting_text(message: Message, state: FSMContext):
+    """Обработка текста ответа"""
+    data = await state.get_data()
+    trigger = data['editing_trigger']
+    
+    storage.data['greetings'][trigger]['text'] = message.text
+    storage.save_data()
+    
+    await state.clear()
+    await message.answer(
+        f"✅ Текст ответа для '{trigger}' обновлен!",
+        reply_markup=get_greetings_menu()
+    )
+
+@dp.message(Form.waiting_greeting_sticker)
+async def process_greeting_sticker(message: Message, state: FSMContext):
+    """Обработка стикера"""
+    if message.text and message.text.lower() == 'удалить':
+        # Удаляем стикер
+        data = await state.get_data()
+        trigger = data['editing_trigger']
+        storage.data['greetings'][trigger]['sticker_id'] = None
+        storage.save_data()
+        
+        await state.clear()
+        await message.answer(
+            f"✅ Стикер для '{trigger}' удален!",
+            reply_markup=get_greetings_menu()
+        )
+        return
+    
+    if not message.sticker:
+        await message.answer("❌ Пожалуйста, отправьте стикер!")
+        return
+    
+    data = await state.get_data()
+    trigger = data['editing_trigger']
+    storage.data['greetings'][trigger]['sticker_id'] = message.sticker.file_id
+    storage.save_data()
+    
+    await state.clear()
+    await message.answer(
+        f"✅ Стикер для '{trigger}' сохранен!",
+        reply_markup=get_greetings_menu()
+    )
+
+@dp.message(Form.waiting_followup_text)
+async def process_followup_text(message: Message, state: FSMContext):
+    """Обработка текста follow-up"""
+    storage.data['follow_up']['text'] = message.text
+    storage.save_data()
+    
+    await state.clear()
+    await message.answer(
+        "✅ Текст follow-up обновлен!",
+        reply_markup=get_followup_menu()
+    )
+
+@dp.message(Form.waiting_followup_delay)
+async def process_followup_delay(message: Message, state: FSMContext):
+    """Обработка задержки follow-up"""
+    try:
+        delay = int(message.text.strip())
+        if 1 <= delay <= 60:
+            storage.data['follow_up']['delay_minutes'] = delay
+            storage.save_data()
+            
+            await state.clear()
+            await message.answer(
+                f"✅ Задержка изменена на {delay} минут!",
+                reply_markup=get_followup_menu()
+            )
+        else:
+            await message.answer(
+                "❌ Введите число от 1 до 60!",
+                reply_markup=get_back_button("menu_followup")
+            )
+    except ValueError:
+        await message.answer(
+            "❌ Введите число от 1 до 60!",
+            reply_markup=get_back_button("menu_followup")
+        )
+
+# ==================== АВТООТВЕТЧИК ====================
+@dp.message()
+async def auto_reply_handler(message: Message):
+    """Основной обработчик автоответов"""
+    # Проверяем, включены ли автоответы
+    if not storage.data['auto_reply_enabled']:
+        return
+    
+    # Игнорируем служебные сообщения
+    if not message.text or message.text.startswith('/'):
+        return
+    
+    # Проверяем триггеры (регистронезависимо)
+    user_text = message.text.lower()
+    
+    for trigger, data in storage.data['greetings'].items():
+        if data['enabled'] and trigger in user_text:
+            # Имитируем набор текста[citation:6]
+            await bot.send_chat_action(
+                chat_id=message.chat.id,
+                action="typing"
+            )
+            
+            # Отправляем текстовый ответ
+            await message.answer(data['text'])
+            
+            # Отправляем стикер, если он есть
+            if data['sticker_id']:
+                await message.answer_sticker(data['sticker_id'])
+            
+            # Планируем follow-up сообщение, если включено
+            if storage.data['follow_up']['enabled']:
+                await schedule_followup(message.chat.id)
+            
+            break
+
+async def schedule_followup(chat_id: int):
+    """Планирование отложенного ответа"""
+    delay = storage.data['follow_up']['delay_minutes']
+    text = storage.data['follow_up']['text']
+    
+    await asyncio.sleep(delay * 60)  # Преобразуем минуты в секунды
+    
+    # Имитируем чтение сообщения (галочки)[citation:6]
+    await bot.send_chat_action(chat_id=chat_id, action="typing")
+    await asyncio.sleep(2)  # Имитация набора текста
+    
+    # Отправляем follow-up сообщение
+    await bot.send_message(chat_id=chat_id, text=text)
+
+# ==================== ЗАПУСК БОТА ====================
+async def main():
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n👋 Бот остановлен")
+    asyncio.run(main())
