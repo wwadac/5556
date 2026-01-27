@@ -7,7 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from datetime import datetime
 import os
 
 # ==================== НАСТРОЙКА ====================
@@ -17,16 +17,16 @@ logger = logging.getLogger(__name__)
 # Токен бота (получи у @BotFather)
 BOT_TOKEN = "8556723456:AAFeT0XjYIF9yEYNJnyKH6VWniFLllb6nq4"
 
+# ID владельца (ваш ID в Telegram)
+OWNER_ID = 123456789  # Замените на ваш ID
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# ID владельца бота (ваш ID)
-OWNER_ID = 8593061718  # Замените на ваш ID Telegram
-
 # ==================== ХРАНЕНИЕ ДАННЫХ ====================
-class DataStorage:
+class BusinessBotStorage:
     def __init__(self):
-        self.data_file = 'bot_data.json'
+        self.data_file = 'business_bot_data.json'
         self.load_data()
     
     def load_data(self):
@@ -34,26 +34,41 @@ class DataStorage:
             with open(self.data_file, 'r', encoding='utf-8') as f:
                 self.data = json.load(f)
         else:
-            # Изначальные настройки с примером замены
             self.data = {
-                'replacements': {
-                    'привет': {
-                        'new_text': 'Приветик! 😊',
-                        'sticker_id': None,  # ID стикера для отправки
-                        'enabled': True,
-                        'delete_original': True,  # Удалять оригинальное сообщение
-                        'send_as_new': True  # Отправлять как новое сообщение (иначе редактировать)
+                'owner_id': OWNER_ID,
+                'auto_reply_enabled': True,
+                'away_messages': {
+                    'default': {
+                        'text': 'Привет! Сейчас я занят(а), но скоро отвечу 😊\n\nОтправьте /help для быстрой помощи.',
+                        'enabled': True
                     },
-                    'тупой': {
-                        'new_text': 'умный',
-                        'sticker_id': None,
-                        'enabled': True,
-                        'delete_original': True,
-                        'send_as_new': True
+                    'work': {
+                        'text': 'Я на работе, отвечу в перерыве.',
+                        'enabled': False
+                    },
+                    'sleep': {
+                        'text': 'Сплю 💤 Отвечу утром!',
+                        'enabled': False
                     }
                 },
-                'auto_replace_enabled': True,
-                'owner_id': OWNER_ID
+                'quick_replies': {
+                    '1': 'Спасибо за сообщение! Отвечу в ближайшее время.',
+                    '2': 'Получил(а) ваше сообщение!',
+                    '3': 'Скоро свяжусь с вами!'
+                },
+                'working_hours': {
+                    'enabled': False,
+                    'start': '09:00',
+                    'end': '18:00',
+                    'offline_message': 'Рабочий день закончился. Отвечу завтра!'
+                },
+                'blacklist': [],
+                'message_history': {},
+                'settings': {
+                    'reply_delay': 5,  # Задержка ответа в секундах
+                    'signature': '\n\n🤖 Автоответчик',
+                    'notify_owner': True  # Уведомлять владельца о новых сообщениях
+                }
             }
             self.save_data()
     
@@ -61,532 +76,320 @@ class DataStorage:
         with open(self.data_file, 'w', encoding='utf-8') as f:
             json.dump(self.data, f, ensure_ascii=False, indent=2)
 
-storage = DataStorage()
+storage = BusinessBotStorage()
 
 # ==================== СОСТОЯНИЯ FSM ====================
-class Form(StatesGroup):
-    waiting_replace_trigger = State()
-    waiting_replace_text = State()
-    waiting_replace_sticker = State()
-    waiting_replace_settings = State()
+class BusinessBotForm(StatesGroup):
+    waiting_away_message = State()
+    waiting_quick_reply = State()
+    waiting_working_hours = State()
 
 # ==================== ИНЛАЙН-КЛАВИАТУРЫ ====================
-def get_main_menu() -> InlineKeyboardMarkup:
-    """Главное меню с инлайн-кнопками"""
+def get_business_main_menu() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     
-    status_icon = "✅" if storage.data['auto_replace_enabled'] else "❌"
+    status = "✅" if storage.data['auto_reply_enabled'] else "❌"
     
     builder.row(
-        InlineKeyboardButton(text=f"🔄 Автозамена: {status_icon}", 
-                           callback_data="toggle_auto_replace")
+        InlineKeyboardButton(text=f"🤖 Автоответы: {status}", callback_data="toggle_business_mode")
     )
     builder.row(
-        InlineKeyboardButton(text="✏️ Настройка замен", callback_data="menu_replacements"),
-        InlineKeyboardButton(text="⚙️ Настройки сообщений", callback_data="menu_settings")
+        InlineKeyboardButton(text="💬 Сообщения нерабочие", callback_data="menu_away_messages"),
+        InlineKeyboardButton(text="⚡ Быстрые ответы", callback_data="menu_quick_replies")
     )
     builder.row(
-        InlineKeyboardButton(text="📊 Статистика", callback_data="stats"),
-        InlineKeyboardButton(text="🆘 Помощь", callback_data="help")
+        InlineKeyboardButton(text="🕐 Рабочие часы", callback_data="menu_working_hours"),
+        InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu_settings")
+    )
+    builder.row(
+        InlineKeyboardButton(text="📊 Статистика", callback_data="business_stats"),
+        InlineKeyboardButton(text="📋 История", callback_data="message_history")
     )
     
     return builder.as_markup()
 
-def get_replacements_menu() -> InlineKeyboardMarkup:
-    """Меню управления заменами"""
+def get_away_messages_menu() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     
-    replacements = storage.data['replacements']
-    
-    if not replacements:
+    for key, msg in storage.data['away_messages'].items():
+        status = "✅" if msg['enabled'] else "❌"
         builder.row(
-            InlineKeyboardButton(text="➕ Добавить первую замену", callback_data="add_replacement")
-        )
-    else:
-        for trigger, data in replacements.items():
-            status = "✅" if data['enabled'] else "❌"
-            sticker_icon = "🖼️" if data['sticker_id'] else ""
-            builder.row(
-                InlineKeyboardButton(
-                    text=f"{status} '{trigger}' → '{data['new_text'][:15]}...'{sticker_icon}",
-                    callback_data=f"edit_replacement:{trigger}"
-                )
+            InlineKeyboardButton(
+                text=f"{status} {key}: {msg['text'][:20]}...",
+                callback_data=f"edit_away:{key}"
             )
+        )
     
     builder.row(
-        InlineKeyboardButton(text="➕ Добавить замену", callback_data="add_replacement"),
+        InlineKeyboardButton(text="➕ Добавить", callback_data="add_away_message"),
         InlineKeyboardButton(text="« Назад", callback_data="main_menu")
     )
     
     return builder.as_markup()
 
-def get_edit_replacement_menu(trigger: str) -> InlineKeyboardMarkup:
-    """Меню редактирования конкретной замены"""
+def get_quick_replies_menu() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     
-    replace_data = storage.data['replacements'][trigger]
-    
-    builder.row(
-        InlineKeyboardButton(text="📝 Изменить текст", 
-                           callback_data=f"change_replace_text:{trigger}"),
-        InlineKeyboardButton(text="🖼 Изменить стикер", 
-                           callback_data=f"change_replace_sticker:{trigger}")
-    )
-    builder.row(
-        InlineKeyboardButton(text="⚙️ Настройки отправки", 
-                           callback_data=f"replace_settings:{trigger}")
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text=f"{'❌ Выключить' if replace_data['enabled'] else '✅ Включить'}",
-            callback_data=f"toggle_replacement:{trigger}"
-        ),
-        InlineKeyboardButton(text="🗑 Удалить", 
-                           callback_data=f"delete_replacement:{trigger}")
-    )
-    builder.row(
-        InlineKeyboardButton(text="« Назад", callback_data="menu_replacements")
-    )
-    
-    return builder.as_markup()
-
-def get_replace_settings_menu(trigger: str) -> InlineKeyboardMarkup:
-    """Меню настроек отправки для замены"""
-    builder = InlineKeyboardBuilder()
-    
-    replace_data = storage.data['replacements'][trigger]
-    
-    delete_icon = "✅" if replace_data['delete_original'] else "❌"
-    send_new_icon = "✅" if replace_data['send_as_new'] else "❌"
-    
-    builder.row(
-        InlineKeyboardButton(
-            text=f"{delete_icon} Удалять оригинал",
-            callback_data=f"toggle_delete:{trigger}"
+    for key, reply in storage.data['quick_replies'].items():
+        builder.row(
+            InlineKeyboardButton(
+                text=f"⚡ {key}: {reply[:30]}...",
+                callback_data=f"send_quick:{key}"
+            )
         )
-    )
+    
     builder.row(
-        InlineKeyboardButton(
-            text=f"{send_new_icon} Отправлять как новое",
-            callback_data=f"toggle_send_new:{trigger}"
-        )
-    )
-    builder.row(
-        InlineKeyboardButton(text="« Назад", callback_data=f"edit_replacement:{trigger}")
+        InlineKeyboardButton(text="✏️ Редактировать", callback_data="edit_quick_replies"),
+        InlineKeyboardButton(text="« Назад", callback_data="main_menu")
     )
     
     return builder.as_markup()
 
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
 @dp.message(Command("start"))
-async def cmd_start(message: Message):
-    """Обработчик команды /start"""
-    await message.answer(
-        "🤖 **Бот для автозамены текста активирован!**\n\n"
-        "✨ **Как работает:**\n"
-        "• Вы пишете в чат сообщение\n"
-        "• Бот находит триггерные слова (например, 'привет')\n"
-        "• Бот заменяет их на настроенный текст\n"
-        "• И отправляет стикер (если настроено)\n\n"
-        "⚙️ **Пример:**\n"
-        "Вы пишете: 'Привет всем!'\n"
-        "Бот меняет на: 'Приветик всем! 😊'\n"
-        "И отправляет веселый стикер\n\n"
-        "Используйте меню для настройки:",
-        reply_markup=get_main_menu(),
-        parse_mode="Markdown"
-    )
-
-@dp.message(Command("settings"))
-async def cmd_settings(message: Message):
-    """Обработчик команды /settings"""
-    await message.answer(
-        "⚙️ **Панель управления автозаменой**\nВыберите раздел:",
-        reply_markup=get_main_menu(),
-        parse_mode="Markdown"
-    )
-
-@dp.message(Command("myid"))
-async def cmd_myid(message: Message):
-    """Команда для получения своего ID"""
-    await message.answer(f"Ваш ID: `{message.from_user.id}`\n\n"
-                        f"Добавьте его в код в переменную OWNER_ID",
-                        parse_mode="Markdown")
-
-@dp.message(Command("test"))
-async def cmd_test(message: Message):
-    """Тестовая команда"""
-    test_text = "привет"
-    if test_text in storage.data['replacements']:
-        data = storage.data['replacements'][test_text]
-        if data['enabled']:
-            await message.answer(
-                f"✅ Тест замены:\n"
-                f"**Исходное:** '{test_text}'\n"
-                f"**Замена:** '{data['new_text']}'\n"
-                f"**Удалять оригинал:** {'Да' if data['delete_original'] else 'Нет'}\n"
-                f"**Стикер:** {'Есть' if data['sticker_id'] else 'Нет'}"
-            )
-        else:
-            await message.answer(f"❌ Замена '{test_text}' выключена")
-    else:
-        await message.answer(f"❌ Замена для '{test_text}' не настроена")
-
-# ==================== ОБРАБОТЧИКИ CALLBACK-ЗАПРОСОВ ====================
-@dp.callback_query(F.data == "main_menu")
-async def main_menu_handler(callback: CallbackQuery):
-    """Главное меню"""
-    await callback.message.edit_text(
-        "🤖 **Главное меню автозамены**\nВыберите раздел:",
-        reply_markup=get_main_menu(),
-        parse_mode="Markdown"
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "toggle_auto_replace")
-async def toggle_auto_replace_handler(callback: CallbackQuery):
-    """Включение/выключение автозамены"""
-    storage.data['auto_replace_enabled'] = not storage.data['auto_replace_enabled']
-    storage.save_data()
-    
-    status = "включена" if storage.data['auto_replace_enabled'] else "выключена"
-    await callback.message.edit_text(
-        f"✅ **Автозамена {status}**\n\n"
-        f"Теперь бот будет {'автоматически заменять ваши сообщения' if storage.data['auto_replace_enabled'] else 'игнорировать ваши сообщения'}.",
-        reply_markup=get_main_menu(),
-        parse_mode="Markdown"
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "menu_replacements")
-async def menu_replacements_handler(callback: CallbackQuery):
-    """Меню замен"""
-    count = len(storage.data['replacements'])
-    
-    await callback.message.edit_text(
-        f"✏️ **Управление заменами текста**\n\n"
-        f"Настроено замен: {count}\n"
-        "Список ваших замен:\n"
-        "✅ - включена, ❌ - выключена, 🖼️ - есть стикер",
-        reply_markup=get_replacements_menu(),
-        parse_mode="Markdown"
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("edit_replacement:"))
-async def edit_replacement_handler(callback: CallbackQuery):
-    """Редактирование конкретной замены"""
-    trigger = callback.data.split(":")[1]
-    replace_data = storage.data['replacements'].get(trigger)
-    
-    if not replace_data:
-        await callback.answer("Замена не найдена!", show_alert=True)
-        return
-    
-    sticker_info = f"\n• 🖼 Стикер: {'есть' if replace_data['sticker_id'] else 'не настроен'}"
-    settings_info = f"\n• ⚙️ Удалять оригинал: {'Да' if replace_data['delete_original'] else 'Нет'}"
-    
-    await callback.message.edit_text(
-        f"✏️ **Редактирование замены**\n\n"
-        f"• Замена: `{trigger}` → `{replace_data['new_text']}`\n"
-        f"• Статус: {'✅ Включена' if replace_data['enabled'] else '❌ Выключена'}"
-        f"{sticker_info}{settings_info}\n\n"
-        f"Выберите действие:",
-        reply_markup=get_edit_replacement_menu(trigger),
-        parse_mode="Markdown"
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "add_replacement")
-async def add_replacement_handler(callback: CallbackQuery, state: FSMContext):
-    """Добавление новой замены"""
-    await callback.message.edit_text(
-        "📝 **Добавление новой замены**\n\n"
-        "Введите слово или фразу, которую нужно заменять\n"
-        "Пример: `привет`, `тупой`, `пока`\n\n"
-        "_Бот будет искать это слово в ваших сообщениях_",
-        reply_markup=InlineKeyboardBuilder().add(
-            InlineKeyboardButton(text="« Назад", callback_data="menu_replacements")
-        ).as_markup(),
-        parse_mode="Markdown"
-    )
-    await state.set_state(Form.waiting_replace_trigger)
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("change_replace_text:"))
-async def change_replace_text_handler(callback: CallbackQuery, state: FSMContext):
-    """Изменение текста замены"""
-    trigger = callback.data.split(":")[1]
-    await state.update_data(editing_trigger=trigger)
-    
-    await callback.message.edit_text(
-        f"📝 **Изменение текста замены**\n\n"
-        f"Текущая замена:\n`{trigger}` → `{storage.data['replacements'][trigger]['new_text']}`\n\n"
-        f"Введите новый текст для замены:",
-        reply_markup=InlineKeyboardBuilder().add(
-            InlineKeyboardButton(text="« Назад", callback_data=f"edit_replacement:{trigger}")
-        ).as_markup(),
-        parse_mode="Markdown"
-    )
-    await state.set_state(Form.waiting_replace_text)
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("change_replace_sticker:"))
-async def change_replace_sticker_handler(callback: CallbackQuery, state: FSMContext):
-    """Изменение стикера для замены"""
-    trigger = callback.data.split(":")[1]
-    await state.update_data(editing_trigger=trigger)
-    
-    current_sticker = storage.data['replacements'][trigger]['sticker_id']
-    sticker_info = "\n_Пришлите 'удалить' чтобы убрать стикер_" if current_sticker else ""
-    
-    await callback.message.edit_text(
-        f"🖼 **Настройка стикера для замены '{trigger}'**\n\n"
-        f"{'Стикер уже настроен' if current_sticker else 'Стикер не настроен'}"
-        f"{sticker_info}\n\n"
-        f"Отправьте стикер (не файл, а именно стикер):",
-        reply_markup=InlineKeyboardBuilder().add(
-            InlineKeyboardButton(text="« Назад", callback_data=f"edit_replacement:{trigger}")
-        ).as_markup(),
-        parse_mode="Markdown"
-    )
-    await state.set_state(Form.waiting_replace_sticker)
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("replace_settings:"))
-async def replace_settings_handler(callback: CallbackQuery):
-    """Настройки отправки для замены"""
-    trigger = callback.data.split(":")[1]
-    
-    await callback.message.edit_text(
-        f"⚙️ **Настройки отправки для '{trigger}'**\n\n"
-        "Выберите настройки:",
-        reply_markup=get_replace_settings_menu(trigger),
-        parse_mode="Markdown"
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("toggle_delete:"))
-async def toggle_delete_handler(callback: CallbackQuery):
-    """Переключение удаления оригинала"""
-    trigger = callback.data.split(":")[1]
-    storage.data['replacements'][trigger]['delete_original'] = not storage.data['replacements'][trigger]['delete_original']
-    storage.save_data()
-    
-    status = "включено" if storage.data['replacements'][trigger]['delete_original'] else "выключено"
-    await callback.answer(f"✅ Удаление оригинала {status}", show_alert=True)
-    await replace_settings_handler(callback)
-
-@dp.callback_query(F.data.startswith("toggle_send_new:"))
-async def toggle_send_new_handler(callback: CallbackQuery):
-    """Переключение отправки как нового"""
-    trigger = callback.data.split(":")[1]
-    storage.data['replacements'][trigger]['send_as_new'] = not storage.data['replacements'][trigger]['send_as_new']
-    storage.save_data()
-    
-    status = "новым сообщением" if storage.data['replacements'][trigger]['send_as_new'] else "редактированием"
-    await callback.answer(f"✅ Отправка {status}", show_alert=True)
-    await replace_settings_handler(callback)
-
-@dp.callback_query(F.data.startswith("toggle_replacement:"))
-async def toggle_replacement_handler(callback: CallbackQuery):
-    """Включение/выключение замены"""
-    trigger = callback.data.split(":")[1]
-    replace_data = storage.data['replacements'].get(trigger)
-    
-    if replace_data:
-        replace_data['enabled'] = not replace_data['enabled']
-        storage.save_data()
-        
-        status = "включена" if replace_data['enabled'] else "выключена"
-        await callback.answer(f"✅ Замена '{trigger}' {status}", show_alert=True)
-        await edit_replacement_handler(callback)
-    else:
-        await callback.answer("❌ Замена не найдена", show_alert=True)
-
-@dp.callback_query(F.data.startswith("delete_replacement:"))
-async def delete_replacement_handler(callback: CallbackQuery):
-    """Удаление замены"""
-    trigger = callback.data.split(":")[1]
-    
-    if trigger in storage.data['replacements']:
-        del storage.data['replacements'][trigger]
-        storage.save_data()
-        
-        await callback.answer(f"✅ Замена '{trigger}' удалена", show_alert=True)
-        await menu_replacements_handler(callback)
-    else:
-        await callback.answer("❌ Замена не найдена", show_alert=True)
-
-# ==================== ОБРАБОТЧИКИ СОСТОЯНИЙ FSM ====================
-@dp.message(Form.waiting_replace_trigger)
-async def process_replace_trigger(message: Message, state: FSMContext):
-    """Обработка нового триггера замены"""
-    trigger = message.text.strip()
-    
-    if not trigger:
-        await message.answer("❌ Триггер не может быть пустым!")
-        return
-    
-    if trigger in storage.data['replacements']:
+async def cmd_business_start(message: Message):
+    """Стартовая команда для владельца"""
+    if message.from_user.id == storage.data['owner_id']:
         await message.answer(
-            f"⚠️ Замена для '{trigger}' уже существует!",
-            reply_markup=get_replacements_menu()
+            "🤖 **Business Bot Mode - Панель управления**\n\n"
+            "Этот бот будет отвечать на личные сообщения, которые приходят ВАМ, "
+            "когда вы заняты или не в сети.\n\n"
+            "⚡ **Функции:**\n"
+            "• Автоответы в ваше отсутствие\n"
+            "• Быстрые ответы одним кликом\n"
+            "• Настройка рабочих часов\n"
+            "• История сообщений\n\n"
+            "**Как подключить к аккаунту:**\n"
+            "1. Telegram → Настройки → Business → Business Bot\n"
+            "2. Выберите этого бота (@вашбот)\n"
+            "3. Настройте режим работы\n\n"
+            "**Управление:**",
+            reply_markup=get_business_main_menu(),
+            parse_mode="Markdown"
         )
-        await state.clear()
-        return
-    
-    # Создаем новую замену
-    storage.data['replacements'][trigger] = {
-        'new_text': f"Замена для '{trigger}'",
-        'sticker_id': None,
-        'enabled': True,
-        'delete_original': True,
-        'send_as_new': True
-    }
-    storage.save_data()
-    
-    await state.clear()
-    await message.answer(
-        f"✅ Замена для '{trigger}' добавлена!\n"
-        f"Теперь настройте текст замены и стикер.",
-        reply_markup=get_replacements_menu()
-    )
+    else:
+        # Если пишет не владелец - это клиент
+        await process_client_message(message)
 
-@dp.message(Form.waiting_replace_text)
-async def process_replace_text(message: Message, state: FSMContext):
-    """Обработка текста замены"""
-    data = await state.get_data()
-    trigger = data['editing_trigger']
-    
-    storage.data['replacements'][trigger]['new_text'] = message.text
-    storage.save_data()
-    
-    await state.clear()
-    await message.answer(
-        f"✅ Текст замены для '{trigger}' обновлен!\n"
-        f"Теперь: `{trigger}` → `{message.text}`",
-        reply_markup=get_replacements_menu()
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    """Помощь для клиентов"""
+    help_text = (
+        "👋 Привет! Это автоответчик.\n\n"
+        "Владелец сейчас не онлайн, но скоро ответит.\n\n"
+        "📌 **Что можно сделать:**\n"
+        "• Оставьте сообщение - вам ответят позже\n"
+        "• Напишите срочный вопрос (я передам)\n"
+        "• Узнайте контакты: /contacts\n"
+        "• Часы работы: /hours\n\n"
+        "Ваше сообщение сохранено!"
     )
+    await message.answer(help_text)
 
-@dp.message(Form.waiting_replace_sticker)
-async def process_replace_sticker(message: Message, state: FSMContext):
-    """Обработка стикера для замены"""
-    if message.text and message.text.lower() == 'удалить':
-        # Удаляем стикер
-        data = await state.get_data()
-        trigger = data['editing_trigger']
-        storage.data['replacements'][trigger]['sticker_id'] = None
-        storage.save_data()
-        
-        await state.clear()
-        await message.answer(
-            f"✅ Стикер для замены '{trigger}' удален!",
-            reply_markup=get_replacements_menu()
-        )
-        return
-    
-    if not message.sticker:
-        await message.answer("❌ Пожалуйста, отправьте стикер (не файл)!")
-        return
-    
-    data = await state.get_data()
-    trigger = data['editing_trigger']
-    storage.data['replacements'][trigger]['sticker_id'] = message.sticker.file_id
-    storage.save_data()
-    
-    await state.clear()
-    await message.answer(
-        f"✅ Стикер для замены '{trigger}' сохранен!",
-        reply_markup=get_replacements_menu()
+@dp.message(Command("contacts"))
+async def cmd_contacts(message: Message):
+    """Контакты"""
+    contacts = (
+        "📞 **Контакты:**\n\n"
+        "• Email: email@example.com\n"
+        "• Телефон: +7 (XXX) XXX-XX-XX\n"
+        "• Сайт: example.com\n\n"
+        "Скоро с вами свяжутся!"
     )
+    await message.answer(contacts)
 
-# ==================== ОСНОВНОЙ ОБРАБОТЧИК АВТОЗАМЕНЫ ====================
+@dp.message(Command("hours"))
+async def cmd_hours(message: Message):
+    """Часы работы"""
+    hours = storage.data['working_hours']
+    
+    if hours['enabled']:
+        text = f"🕐 **Часы работы:**\n\n{hours['start']} - {hours['end']}\n\n"
+        if hours['offline_message']:
+            text += f"_Вне рабочих часов:_ {hours['offline_message']}"
+    else:
+        text = "⏰ Часы работы не настроены"
+    
+    await message.answer(text)
+
+# ==================== ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ ====================
 @dp.message()
-async def auto_replace_handler(message: Message):
-    """Основной обработчик автозамены сообщений владельца"""
+async def universal_message_handler(message: Message):
+    """Обработчик ВСЕХ сообщений"""
     
-    # Проверяем, включена ли автозамена
-    if not storage.data['auto_replace_enabled']:
-        return
-    
-    # Проверяем, что сообщение от владельца
-    if message.from_user.id != storage.data.get('owner_id', OWNER_ID):
-        return
-    
-    # Игнорируем команды и служебные сообщения
-    if message.text and message.text.startswith('/'):
-        return
-    
-    # Игнорируем сообщения от самого бота
-    if message.from_user.id == bot.id:
-        return
-    
-    # Проверяем текст сообщения
-    if not message.text:
-        return
-    
-    user_text = message.text
+    user_id = message.from_user.id
     chat_id = message.chat.id
-    message_id = message.message_id
     
-    # Проверяем все замены
-    for trigger, data in storage.data['replacements'].items():
-        if data['enabled'] and trigger.lower() in user_text.lower():
-            # Получаем новый текст (заменяем все вхождения)
-            new_text = user_text
-            # Простая замена без учета регистра
-            import re
-            new_text = re.sub(re.escape(trigger), data['new_text'], new_text, flags=re.IGNORECASE)
-            
-            # Если текст не изменился, пропускаем
-            if new_text == user_text:
-                continue
-            
-            try:
-                # Если нужно удалить оригинал
-                if data['delete_original']:
-                    try:
-                        await message.delete()
-                    except Exception as e:
-                        logger.error(f"Не удалось удалить сообщение: {e}")
-                        # Если не удалось удалить, редактируем его
-                        await bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=message_id,
-                            text=new_text
-                        )
-                        message_id = None  # Сообщение уже отредактировано
-                else:
-                    # Отправляем как новое сообщение
-                    await bot.send_message(
-                        chat_id=chat_id,
-                        text=new_text
-                    )
-                
-                # Отправляем стикер, если он есть
-                if data['sticker_id']:
-                    await asyncio.sleep(0.3)  # Небольшая пауза
-                    await bot.send_sticker(
-                        chat_id=chat_id,
-                        sticker=data['sticker_id']
-                    )
-                    
-            except Exception as e:
-                logger.error(f"Ошибка при обработке замены: {e}")
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=f"⚠️ Ошибка замены: {e}"
-                )
-            
-            break  # Обрабатываем только первую найденную замену
+    # Сохраняем историю
+    save_message_history(user_id, message.text)
+    
+    # Если сообщение от владельца
+    if user_id == storage.data['owner_id']:
+        await handle_owner_message(message)
+    else:
+        # Если сообщение от клиента (кто-то пишет владельцу)
+        await handle_client_message(message)
+
+async def handle_owner_message(message: Message):
+    """Обработка сообщений от владельца"""
+    text = message.text or ""
+    
+    # Команды управления через текст (альтернатива inline-кнопкам)
+    if text.lower() == 'статус':
+        status = "включен" if storage.data['auto_reply_enabled'] else "выключен"
+        await message.answer(f"🤖 Business Bot Mode: {status}")
+    
+    elif text.lower() == 'оффлайн':
+        # Быстрое включение автоответчика
+        storage.data['auto_reply_enabled'] = True
+        storage.save_data()
+        await message.answer("✅ Автоответчик включен. Бот будет отвечать за вас.")
+    
+    elif text.lower() == 'онлайн':
+        # Быстрое выключение
+        storage.data['auto_reply_enabled'] = False
+        storage.save_data()
+        await message.answer("❌ Автоответчик выключен. Вы отвечаете сами.")
+
+async def handle_client_message(message: Message):
+    """Обработка сообщений от клиентов (тех, кто пишет владельцу)"""
+    
+    # Проверяем, включен ли автоответ
+    if not storage.data['auto_reply_enabled']:
+        # Если автоответ выключен, уведомляем владельца
+        if storage.data['settings']['notify_owner']:
+            await notify_owner_about_message(message)
+        return
+    
+    # Проверяем рабочие часы
+    if not is_within_working_hours():
+        offline_msg = storage.data['working_hours']['offline_message']
+        if offline_msg:
+            await message.answer(offline_msg)
+        return
+    
+    # Небольшая задержка для реалистичности
+    await asyncio.sleep(storage.data['settings']['reply_delay'])
+    
+    # Отправляем автоответ
+    away_message = get_active_away_message()
+    signature = storage.data['settings']['signature']
+    
+    full_message = away_message + signature
+    
+    await message.answer(full_message)
+    
+    # Уведомляем владельца
+    if storage.data['settings']['notify_owner']:
+        await notify_owner_about_message(message)
+
+def save_message_history(user_id: int, message_text: str):
+    """Сохранение истории сообщений"""
+    if str(user_id) not in storage.data['message_history']:
+        storage.data['message_history'][str(user_id)] = []
+    
+    history_entry = {
+        'timestamp': datetime.now().isoformat(),
+        'message': message_text[:500],  # Ограничиваем длину
+        'user_id': user_id
+    }
+    
+    storage.data['message_history'][str(user_id)].append(history_entry)
+    
+    # Ограничиваем историю последними 50 сообщениями
+    if len(storage.data['message_history'][str(user_id)]) > 50:
+        storage.data['message_history'][str(user_id)] = storage.data['message_history'][str(user_id)][-50:]
+    
+    storage.save_data()
+
+async def notify_owner_about_message(message: Message):
+    """Уведомление владельца о новом сообщении"""
+    owner_id = storage.data['owner_id']
+    
+    user_info = f"👤 {message.from_user.full_name} (@{message.from_user.username or 'нет'})"
+    message_preview = f"💬 {message.text[:100]}{'...' if len(message.text) > 100 else ''}"
+    
+    notification = (
+        f"📨 **Новое сообщение**\n\n"
+        f"{user_info}\n"
+        f"{message_preview}\n\n"
+        f"ID: `{message.from_user.id}`\n"
+        f"Чат: `{message.chat.id}`"
+    )
+    
+    try:
+        await bot.send_message(
+            chat_id=owner_id,
+            text=notification,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Не удалось уведомить владельца: {e}")
+
+def get_active_away_message() -> str:
+    """Получение активного сообщения нерабочие"""
+    for key, msg in storage.data['away_messages'].items():
+        if msg['enabled']:
+            return msg['text']
+    
+    # Если ничего не найдено, возвращаем дефолтное
+    return storage.data['away_messages']['default']['text']
+
+def is_within_working_hours() -> bool:
+    """Проверка, находятся ли текущее время в рабочих часах"""
+    hours = storage.data['working_hours']
+    
+    if not hours['enabled']:
+        return True  # Если часы не настроены, всегда считаем рабочими
+    
+    try:
+        current_time = datetime.now().time()
+        start = datetime.strptime(hours['start'], '%H:%M').time()
+        end = datetime.strptime(hours['end'], '%H:%M').time()
+        
+        return start <= current_time <= end
+    except Exception as e:
+        logger.error(f"Ошибка проверки рабочего времени: {e}")
+        return True
+
+# ==================== ОБРАБОТЧИКИ INLINE-КНОПОК ====================
+@dp.callback_query(F.data == "toggle_business_mode")
+async def toggle_business_mode(callback: CallbackQuery):
+    """Включение/выключение Business Bot Mode"""
+    storage.data['auto_reply_enabled'] = not storage.data['auto_reply_enabled']
+    storage.save_data()
+    
+    status = "ВКЛЮЧЕН" if storage.data['auto_reply_enabled'] else "ВЫКЛЮЧЕН"
+    await callback.message.edit_text(
+        f"🤖 **Business Bot Mode: {status}**\n\n"
+        f"Теперь бот будет {'отвечать на сообщения вместо вас' if storage.data['auto_reply_enabled'] else 'только уведомлять вас о новых сообщениях'}.",
+        reply_markup=get_business_main_menu(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "menu_away_messages")
+async def menu_away_messages(callback: CallbackQuery):
+    """Меню сообщений нерабочие"""
+    await callback.message.edit_text(
+        "💬 **Сообщения нерабочие**\n\n"
+        "Эти сообщения будут отправляться, когда вы не в сети.\n"
+        "✅ - активно, ❌ - неактивно\n",
+        reply_markup=get_away_messages_menu(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
 
 # ==================== ЗАПУСК БОТА ====================
 async def main():
-    print("🤖 Бот для автозамены запускается...")
-    print(f"• Владелец: {storage.data.get('owner_id', 'Не установлен')}")
-    print(f"• Замен настроено: {len(storage.data['replacements'])}")
-    print(f"• Автозамена: {'ВКЛ' if storage.data['auto_replace_enabled'] else 'ВЫКЛ'}")
+    print("🤖 Business Bot запускается...")
+    print(f"• Владелец: {storage.data['owner_id']}")
+    print(f"• Автоответы: {'ВКЛ' if storage.data['auto_reply_enabled'] else 'ВЫКЛ'}")
+    print(f"• Сообщений в истории: {sum(len(v) for v in storage.data['message_history'].values())}")
+    print("\n📌 Инструкция по подключению:")
+    print("1. Откройте Telegram → Настройки → Business → Business Bot")
+    print("2. Выберите этого бота")
+    print("3. Настройте в этом меню сообщения")
     
     await dp.start_polling(bot)
 
