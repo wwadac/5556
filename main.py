@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = "8556723456:AAFeT0XjYIF9yEYNJnyKH6VWniFLllb6nq4"
 
 # ID владельца (ваш ID в Telegram)
-OWNER_ID = 123456789  # Замените на ваш ID
+OWNER_ID = 8593061718  # Замените на ваш ID
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -145,111 +145,78 @@ def get_quick_replies_menu() -> InlineKeyboardMarkup:
     
     return builder.as_markup()
 
-# ==================== ОБРАБОТЧИКИ КОМАНД ====================
-@dp.message(Command("start"))
-async def cmd_business_start(message: Message):
-    """Стартовая команда для владельца"""
-    if message.from_user.id == storage.data['owner_id']:
-        await message.answer(
-            "🤖 **Business Bot Mode - Панель управления**\n\n"
-            "Этот бот будет отвечать на личные сообщения, которые приходят ВАМ, "
-            "когда вы заняты или не в сети.\n\n"
-            "⚡ **Функции:**\n"
-            "• Автоответы в ваше отсутствие\n"
-            "• Быстрые ответы одним кликом\n"
-            "• Настройка рабочих часов\n"
-            "• История сообщений\n\n"
-            "**Как подключить к аккаунту:**\n"
-            "1. Telegram → Настройки → Business → Business Bot\n"
-            "2. Выберите этого бота (@вашбот)\n"
-            "3. Настройте режим работы\n\n"
-            "**Управление:**",
-            reply_markup=get_business_main_menu(),
-            parse_mode="Markdown"
-        )
-    else:
-        # Если пишет не владелец - это клиент
-        await process_client_message(message)
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+def save_message_history(user_id: int, message_text: str):
+    """Сохранение истории сообщений"""
+    if message_text is None:
+        return
+    
+    if str(user_id) not in storage.data['message_history']:
+        storage.data['message_history'][str(user_id)] = []
+    
+    history_entry = {
+        'timestamp': datetime.now().isoformat(),
+        'message': message_text[:500],  # Ограничиваем длину
+        'user_id': user_id
+    }
+    
+    storage.data['message_history'][str(user_id)].append(history_entry)
+    
+    # Ограничиваем историю последними 50 сообщениями
+    if len(storage.data['message_history'][str(user_id)]) > 50:
+        storage.data['message_history'][str(user_id)] = storage.data['message_history'][str(user_id)][-50:]
+    
+    storage.save_data()
 
-@dp.message(Command("help"))
-async def cmd_help(message: Message):
-    """Помощь для клиентов"""
-    help_text = (
-        "👋 Привет! Это автоответчик.\n\n"
-        "Владелец сейчас не онлайн, но скоро ответит.\n\n"
-        "📌 **Что можно сделать:**\n"
-        "• Оставьте сообщение - вам ответят позже\n"
-        "• Напишите срочный вопрос (я передам)\n"
-        "• Узнайте контакты: /contacts\n"
-        "• Часы работы: /hours\n\n"
-        "Ваше сообщение сохранено!"
-    )
-    await message.answer(help_text)
+def get_active_away_message() -> str:
+    """Получение активного сообщения нерабочие"""
+    for key, msg in storage.data['away_messages'].items():
+        if msg['enabled']:
+            return msg['text']
+    
+    # Если ничего не найдено, возвращаем дефолтное
+    return storage.data['away_messages']['default']['text']
 
-@dp.message(Command("contacts"))
-async def cmd_contacts(message: Message):
-    """Контакты"""
-    contacts = (
-        "📞 **Контакты:**\n\n"
-        "• Email: email@example.com\n"
-        "• Телефон: +7 (XXX) XXX-XX-XX\n"
-        "• Сайт: example.com\n\n"
-        "Скоро с вами свяжутся!"
-    )
-    await message.answer(contacts)
-
-@dp.message(Command("hours"))
-async def cmd_hours(message: Message):
-    """Часы работы"""
+def is_within_working_hours() -> bool:
+    """Проверка, находятся ли текущее время в рабочих часах"""
     hours = storage.data['working_hours']
     
-    if hours['enabled']:
-        text = f"🕐 **Часы работы:**\n\n{hours['start']} - {hours['end']}\n\n"
-        if hours['offline_message']:
-            text += f"_Вне рабочих часов:_ {hours['offline_message']}"
-    else:
-        text = "⏰ Часы работы не настроены"
+    if not hours['enabled']:
+        return True  # Если часы не настроены, всегда считаем рабочими
     
-    await message.answer(text)
+    try:
+        current_time = datetime.now().time()
+        start = datetime.strptime(hours['start'], '%H:%M').time()
+        end = datetime.strptime(hours['end'], '%H:%M').time()
+        
+        return start <= current_time <= end
+    except Exception as e:
+        logger.error(f"Ошибка проверки рабочего времени: {e}")
+        return True
 
-# ==================== ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ ====================
-@dp.message()
-async def universal_message_handler(message: Message):
-    """Обработчик ВСЕХ сообщений"""
+async def notify_owner_about_message(message: Message):
+    """Уведомление владельца о новом сообщении"""
+    owner_id = storage.data['owner_id']
     
-    user_id = message.from_user.id
-    chat_id = message.chat.id
+    user_info = f"👤 {message.from_user.full_name} (@{message.from_user.username or 'нет'})"
+    message_preview = f"💬 {message.text[:100]}{'...' if len(message.text) > 100 else ''}" if message.text else "[Без текста]"
     
-    # Сохраняем историю
-    save_message_history(user_id, message.text)
+    notification = (
+        f"📨 **Новое сообщение**\n\n"
+        f"{user_info}\n"
+        f"{message_preview}\n\n"
+        f"ID: `{message.from_user.id}`\n"
+        f"Чат: `{message.chat.id}`"
+    )
     
-    # Если сообщение от владельца
-    if user_id == storage.data['owner_id']:
-        await handle_owner_message(message)
-    else:
-        # Если сообщение от клиента (кто-то пишет владельцу)
-        await handle_client_message(message)
-
-async def handle_owner_message(message: Message):
-    """Обработка сообщений от владельца"""
-    text = message.text or ""
-    
-    # Команды управления через текст (альтернатива inline-кнопкам)
-    if text.lower() == 'статус':
-        status = "включен" if storage.data['auto_reply_enabled'] else "выключен"
-        await message.answer(f"🤖 Business Bot Mode: {status}")
-    
-    elif text.lower() == 'оффлайн':
-        # Быстрое включение автоответчика
-        storage.data['auto_reply_enabled'] = True
-        storage.save_data()
-        await message.answer("✅ Автоответчик включен. Бот будет отвечать за вас.")
-    
-    elif text.lower() == 'онлайн':
-        # Быстрое выключение
-        storage.data['auto_reply_enabled'] = False
-        storage.save_data()
-        await message.answer("❌ Автоответчик выключен. Вы отвечаете сами.")
+    try:
+        await bot.send_message(
+            chat_id=owner_id,
+            text=notification,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Не удалось уведомить владельца: {e}")
 
 async def handle_client_message(message: Message):
     """Обработка сообщений от клиентов (тех, кто пишет владельцу)"""
@@ -283,74 +250,129 @@ async def handle_client_message(message: Message):
     if storage.data['settings']['notify_owner']:
         await notify_owner_about_message(message)
 
-def save_message_history(user_id: int, message_text: str):
-    """Сохранение истории сообщений"""
-    if str(user_id) not in storage.data['message_history']:
-        storage.data['message_history'][str(user_id)] = []
-    
-    history_entry = {
-        'timestamp': datetime.now().isoformat(),
-        'message': message_text[:500],  # Ограничиваем длину
-        'user_id': user_id
-    }
-    
-    storage.data['message_history'][str(user_id)].append(history_entry)
-    
-    # Ограничиваем историю последними 50 сообщениями
-    if len(storage.data['message_history'][str(user_id)]) > 50:
-        storage.data['message_history'][str(user_id)] = storage.data['message_history'][str(user_id)][-50:]
-    
-    storage.save_data()
-
-async def notify_owner_about_message(message: Message):
-    """Уведомление владельца о новом сообщении"""
-    owner_id = storage.data['owner_id']
-    
-    user_info = f"👤 {message.from_user.full_name} (@{message.from_user.username or 'нет'})"
-    message_preview = f"💬 {message.text[:100]}{'...' if len(message.text) > 100 else ''}"
-    
-    notification = (
-        f"📨 **Новое сообщение**\n\n"
-        f"{user_info}\n"
-        f"{message_preview}\n\n"
-        f"ID: `{message.from_user.id}`\n"
-        f"Чат: `{message.chat.id}`"
-    )
-    
-    try:
-        await bot.send_message(
-            chat_id=owner_id,
-            text=notification,
+# ==================== ОБРАБОТЧИКИ КОМАНД ====================
+@dp.message(Command("start"))
+async def cmd_business_start(message: Message):
+    """Стартовая команда для владельца"""
+    if message.from_user.id == storage.data['owner_id']:
+        await message.answer(
+            "🤖 **Business Bot Mode - Панель управления**\n\n"
+            "Этот бот будет отвечать на личные сообщения, которые приходят ВАМ, "
+            "когда вы заняты или не в сети.\n\n"
+            "⚡ **Функции:**\n"
+            "• Автоответы в ваше отсутствие\n"
+            "• Быстрые ответы одним кликом\n"
+            "• Настройка рабочих часов\n"
+            "• История сообщений\n\n"
+            "**Как подключить к аккаунту:**\n"
+            "1. Telegram → Настройки → Business → Business Bot\n"
+            "2. Выберите этого бота (@вашбот)\n"
+            "3. Настройте режим работы\n\n"
+            "**Управление:**",
+            reply_markup=get_business_main_menu(),
             parse_mode="Markdown"
         )
-    except Exception as e:
-        logger.error(f"Не удалось уведомить владельца: {e}")
+    else:
+        # Если пишет не владелец - это клиент
+        save_message_history(message.from_user.id, message.text)
+        await handle_client_message(message)
 
-def get_active_away_message() -> str:
-    """Получение активного сообщения нерабочие"""
-    for key, msg in storage.data['away_messages'].items():
-        if msg['enabled']:
-            return msg['text']
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    """Помощь для клиентов"""
+    save_message_history(message.from_user.id, message.text)
     
-    # Если ничего не найдено, возвращаем дефолтное
-    return storage.data['away_messages']['default']['text']
+    help_text = (
+        "👋 Привет! Это автоответчик.\n\n"
+        "Владелец сейчас не онлайн, но скоро ответит.\n\n"
+        "📌 **Что можно сделать:**\n"
+        "• Оставьте сообщение - вам ответят позже\n"
+        "• Напишите срочный вопрос (я передам)\n"
+        "• Узнайте контакты: /contacts\n"
+        "• Часы работы: /hours\n\n"
+        "Ваше сообщение сохранено!"
+    )
+    await message.answer(help_text)
+    
+    # Уведомляем владельца
+    if storage.data['settings']['notify_owner']:
+        await notify_owner_about_message(message)
 
-def is_within_working_hours() -> bool:
-    """Проверка, находятся ли текущее время в рабочих часах"""
+@dp.message(Command("contacts"))
+async def cmd_contacts(message: Message):
+    """Контакты"""
+    save_message_history(message.from_user.id, message.text)
+    
+    contacts = (
+        "📞 **Контакты:**\n\n"
+        "• Email: email@example.com\n"
+        "• Телефон: +7 (XXX) XXX-XX-XX\n"
+        "• Сайт: example.com\n\n"
+        "Скоро с вами свяжутся!"
+    )
+    await message.answer(contacts)
+
+@dp.message(Command("hours"))
+async def cmd_hours(message: Message):
+    """Часы работы"""
+    save_message_history(message.from_user.id, message.text)
+    
     hours = storage.data['working_hours']
     
-    if not hours['enabled']:
-        return True  # Если часы не настроены, всегда считаем рабочими
+    if hours['enabled']:
+        text = f"🕐 **Часы работы:**\n\n{hours['start']} - {hours['end']}\n\n"
+        if hours['offline_message']:
+            text += f"_Вне рабочих часов:_ {hours['offline_message']}"
+    else:
+        text = "⏰ Часы работы не настроены"
     
-    try:
-        current_time = datetime.now().time()
-        start = datetime.strptime(hours['start'], '%H:%M').time()
-        end = datetime.strptime(hours['end'], '%H:%M').time()
-        
-        return start <= current_time <= end
-    except Exception as e:
-        logger.error(f"Ошибка проверки рабочего времени: {e}")
-        return True
+    await message.answer(text)
+
+# ==================== ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ ====================
+@dp.message()
+async def universal_message_handler(message: Message):
+    """Обработчик ВСЕХ сообщений"""
+    
+    user_id = message.from_user.id
+    
+    # Сохраняем историю
+    save_message_history(user_id, message.text)
+    
+    # Если сообщение от владельца
+    if user_id == storage.data['owner_id']:
+        await handle_owner_message(message)
+    else:
+        # Если сообщение от клиента (кто-то пишет владельцу)
+        await handle_client_message(message)
+
+async def handle_owner_message(message: Message):
+    """Обработка сообщений от владельца"""
+    text = message.text or ""
+    
+    # Команды управления через текст (альтернатива inline-кнопкам)
+    if text.lower() == 'статус':
+        status = "включен" if storage.data['auto_reply_enabled'] else "выключен"
+        await message.answer(f"🤖 Business Bot Mode: {status}")
+    
+    elif text.lower() == 'оффлайн':
+        # Быстрое включение автоответчика
+        storage.data['auto_reply_enabled'] = True
+        storage.save_data()
+        await message.answer("✅ Автоответчик включен. Бот будет отвечать за вас.")
+    
+    elif text.lower() == 'онлайн':
+        # Быстрое выключение
+        storage.data['auto_reply_enabled'] = False
+        storage.save_data()
+        await message.answer("❌ Автоответчик выключен. Вы отвечаете сами.")
+    
+    elif text.lower() == 'меню':
+        # Показать главное меню
+        await message.answer(
+            "🤖 **Business Bot Mode - Панель управления**",
+            reply_markup=get_business_main_menu(),
+            parse_mode="Markdown"
+        )
 
 # ==================== ОБРАБОТЧИКИ INLINE-КНОПОК ====================
 @dp.callback_query(F.data == "toggle_business_mode")
@@ -379,6 +401,40 @@ async def menu_away_messages(callback: CallbackQuery):
         parse_mode="Markdown"
     )
     await callback.answer()
+
+@dp.callback_query(F.data == "menu_quick_replies")
+async def menu_quick_replies(callback: CallbackQuery):
+    """Меню быстрых ответов"""
+    await callback.message.edit_text(
+        "⚡ **Быстрые ответы**\n\n"
+        "Нажмите на ответ, чтобы отправить его клиенту:\n",
+        reply_markup=get_quick_replies_menu(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "main_menu")
+async def main_menu_handler(callback: CallbackQuery):
+    """Главное меню"""
+    await callback.message.edit_text(
+        "🤖 **Business Bot Mode - Панель управления**",
+        reply_markup=get_business_main_menu(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("send_quick:"))
+async def send_quick_reply(callback: CallbackQuery):
+    """Отправка быстрого ответа"""
+    reply_key = callback.data.split(":")[1]
+    reply_text = storage.data['quick_replies'].get(reply_key)
+    
+    if reply_text:
+        # Здесь должна быть логика отправки клиенту
+        # Пока просто покажем пример
+        await callback.answer(f"Быстрый ответ: {reply_text[:30]}...", show_alert=True)
+    else:
+        await callback.answer("❌ Ответ не найден", show_alert=True)
 
 # ==================== ЗАПУСК БОТА ====================
 async def main():
