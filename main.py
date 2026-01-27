@@ -7,6 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from datetime import datetime
 import os
 
