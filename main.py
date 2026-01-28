@@ -125,24 +125,36 @@ async def set_sticker(msg: Message, state: FSMContext):
 # ---------- BUSINESS LOGIC ----------
 @dp.message()
 async def business_handler(msg: Message):
+    # Пропускаем сообщения без business_connection_id (не из бизнес-бота)
+    if not msg.business_connection_id:
+        return
+    
     c = cfg(msg.chat.id)
-
-    # Сохраняем business_connection_id
-    if msg.business_connection_id:
+    
+    # Сохраняем business_connection_id если его еще нет
+    if not c["business_id"]:
         c["business_id"] = msg.business_connection_id
         save(db)
-
+    
     if not c["enabled"]:
         return
 
     text = (msg.text or "").lower()
 
-    # Определяем, является ли сообщение от бизнес-аккаунта (отправителя)
-    # В бизнес-ботах сообщения от бизнес-аккаунта имеют sender_chat, а от клиента - нет
-    is_from_business = msg.sender_chat is not None
+    # Определяем, является ли сообщение от бизнес-аккаунта
+    # В бизнес-ботах от бизнес-аккаунта сообщения приходят через from_user
+    # От клиента тоже приходят через from_user, но нам нужно определить кто есть кто
     
-    # 1. Если сообщение от бизнес-аккаунта и содержит "привет"
-    if is_from_business and ("привет" in text):
+    # Проверяем, является ли это ответом на наше сообщение
+    is_reply_to_our_message = msg.reply_to_message is not None
+    
+    # Логика:
+    # 1. Если сообщение НЕ является ответом на наше сообщение (новый диалог)
+    #    и содержит "привет" - отправляем приветствие
+    # 2. Если сообщение является ответом на наше сообщение - отправляем follow-up
+    
+    if not is_reply_to_our_message and ("привет" in text or "здравствуй" in text or "здравствуйте" in text):
+        # Это новое сообщение от клиента с приветствием
         await bot.send_message(
             chat_id=msg.chat.id,
             text=c["greet"],
@@ -155,9 +167,9 @@ async def business_handler(msg: Message):
                 sticker=c["sticker"],
                 business_connection_id=c["business_id"]
             )
-
-    # 2. Если сообщение от клиента (не от бизнес-аккаунта) и это ответ на наше сообщение
-    elif not is_from_business and msg.reply_to_message:
+    
+    elif is_reply_to_our_message:
+        # Это ответ клиента на наше сообщение
         # Отмечаем сообщение как прочитанное
         await bot.read_business_message(
             business_connection_id=c["business_id"],
