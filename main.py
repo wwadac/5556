@@ -154,3 +154,31 @@ async def business_handler(msg: Message):
     # Ответ собеседника
     if not msg.outgoing and msg.reply_to_message:
         await bot.read_business_message(
+        business_connection_id=c["business_id"],
+            chat_id=msg.chat.id,
+            message_id=msg.message_id
+        )
+
+        await asyncio.sleep(c["delay"])
+
+        await bot.send_chat_action(
+            chat_id=msg.chat.id,
+            action=ChatAction.TYPING,
+            business_connection_id=c["business_id"]
+        )
+
+        await asyncio.sleep(3)
+
+        await bot.send_message(
+            chat_id=msg.chat.id,
+            text=c["follow"],
+            business_connection_id=c["business_id"]
+        )
+
+
+# ---------- RUN ----------
+async def main():
+    await dp.start_polling(bot)
+
+if name == "__main__":
+    asyncio.run(main())
