@@ -127,6 +127,7 @@ async def set_sticker(msg: Message, state: FSMContext):
 async def business_handler(msg: Message):
     c = cfg(msg.chat.id)
 
+    # Сохраняем business_connection_id
     if msg.business_connection_id:
         c["business_id"] = msg.business_connection_id
         save(db)
@@ -136,8 +137,12 @@ async def business_handler(msg: Message):
 
     text = (msg.text or "").lower()
 
-    # Ты написал "привет"
-    if msg.outgoing and ("привет" in text):
+    # Определяем, является ли сообщение от бизнес-аккаунта (отправителя)
+    # В бизнес-ботах сообщения от бизнес-аккаунта имеют sender_chat, а от клиента - нет
+    is_from_business = msg.sender_chat is not None
+    
+    # 1. Если сообщение от бизнес-аккаунта и содержит "привет"
+    if is_from_business and ("привет" in text):
         await bot.send_message(
             chat_id=msg.chat.id,
             text=c["greet"],
@@ -151,24 +156,29 @@ async def business_handler(msg: Message):
                 business_connection_id=c["business_id"]
             )
 
-    # Ответ собеседника
-    if not msg.outgoing and msg.reply_to_message:
+    # 2. Если сообщение от клиента (не от бизнес-аккаунта) и это ответ на наше сообщение
+    elif not is_from_business and msg.reply_to_message:
+        # Отмечаем сообщение как прочитанное
         await bot.read_business_message(
-        business_connection_id=c["business_id"],
+            business_connection_id=c["business_id"],
             chat_id=msg.chat.id,
             message_id=msg.message_id
         )
 
+        # Ждем указанную задержку
         await asyncio.sleep(c["delay"])
 
+        # Показываем действие "печатает"
         await bot.send_chat_action(
             chat_id=msg.chat.id,
             action=ChatAction.TYPING,
             business_connection_id=c["business_id"]
         )
 
+        # Имитируем набор текста
         await asyncio.sleep(3)
 
+        # Отправляем follow-up сообщение
         await bot.send_message(
             chat_id=msg.chat.id,
             text=c["follow"],
