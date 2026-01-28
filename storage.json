@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "first_text": "Приветик 😊",
+  "sticker_id": null,
+  "followup_text": "Как у тебя дела?",
+  "delay_min": 10,
+  "delay_max": 50,
+  "typing": true
+}
