@@ -1,3 +1,4 @@
-aiogram>=3.4.1
-aiofiles
-python-dotenv
+pyTelegramBotAPI==4.16.1
+aiohttp==3.9.3
+asyncio==3.4.3
+python-dotenv==1.0.0
